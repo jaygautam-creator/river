@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = process.env.PORT || 8787
 const JWT_SECRET = process.env.JWT_SECRET || 'kindred-local-demo-secret'
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5'
 const db = new Database(path.join(__dirname, 'kindred.db'))
 db.pragma('journal_mode = WAL')
 db.exec(`
@@ -99,7 +100,7 @@ function relevantStorylines(userId, content) {
   return scored.sort((a, b) => b.score - a.score).slice(0, 3).map(x => x.s)
 }
 
-function generateReply(content, storylines, userName) {
+function generateLocalReply(content, storylines, userName) {
   const lower = content.toLowerCase()
   if (/(kill myself|hurt myself|end my life|suicide|self harm)/i.test(content)) {
     return `I’m really glad you said that out loud. I can stay with you here, but I can’t be the only support for something this heavy. If you might act on these thoughts, call emergency services now; in the US or Canada call or text 988, and elsewhere use findahelpline.com. Can you move somewhere you’re not alone and tell me who could be with you right now?`
@@ -110,6 +111,24 @@ function generateReply(content, storylines, userName) {
   if (lower.includes('bad') || lower.includes('hard') || lower.includes('stressed') || lower.includes('overwhelm')) return focus ? `That sounds like a lot to hold at once. With ${focus.topic.toLowerCase()} already in the background, what’s the sharpest part of today?` : `That sounds like a lot to hold. What’s the sharpest part of today?`
   if (focus) return `I’m with you. ${focus.topic} is still in the thread here, so we don’t have to start from zero. What feels most important about this today?`
   return `I’m here with you. Say a little more — what’s the part you keep coming back to?`
+}
+
+async function generateReply(content, storylines, userName) {
+  if (!process.env.OPENAI_API_KEY) return generateLocalReply(content, storylines, userName)
+  const context = storylines.length ? `Known storylines:\n${storylines.map(s => `- ${s.topic}: ${s.summary}`).join('\n')}` : 'No storylines are known yet.'
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: OPENAI_MODEL, input: [
+      { role: 'system', content: [{ type: 'input_text', text: `You are River, a warm, grounded AI companion for ${userName}. Keep replies concise, human, and emotionally attentive. Use ongoing storylines when relevant, but never invent memories. Do not present yourself as a therapist. If the user may be in immediate danger, encourage emergency services and trusted human support.\n\n${context}` }] },
+      { role: 'user', content: [{ type: 'input_text', text: content }] }
+    ], max_output_tokens: 220 })
+  })
+  if (!response.ok) throw new Error(`Model request failed (${response.status}).`)
+  const data = await response.json()
+  const text = data.output?.flatMap(item => item.content || []).find(item => item.type === 'output_text')?.text?.trim()
+  if (!text) throw new Error('Model returned an empty response.')
+  return text
 }
 
 app.post('/api/auth/signup', (req, res) => {
@@ -134,13 +153,17 @@ app.get('/api/conversation', auth, (req, res) => {
   res.json({ messages, storylines: getStorylines(req.user.id) })
 })
 
-app.post('/api/chat', auth, (req, res) => {
+app.post('/api/chat', auth, async (req, res) => {
   const content = String(req.body.content || '').trim()
   if (!content) return res.status(400).json({ error: 'Message is empty.' })
   db.prepare("INSERT INTO messages (user_id, role, content) VALUES (?, 'user', ?)").run(req.user.id, content)
   const storyline = extractStoryline(req.user.id, content)
   const context = relevantStorylines(req.user.id, content)
-  const reply = generateReply(content, context, req.user.name)
+  let reply
+  try { reply = await generateReply(content, context, req.user.name) } catch (error) {
+    console.error(error.message)
+    reply = generateLocalReply(content, context, req.user.name)
+  }
   db.prepare("INSERT INTO messages (user_id, role, content) VALUES (?, 'assistant', ?)").run(req.user.id, reply)
   res.json({ reply, storyline, storylines: getStorylines(req.user.id), context })
 })
