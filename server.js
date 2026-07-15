@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken'
 import Database from 'better-sqlite3'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import crypto from 'crypto'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = process.env.PORT || 8787
@@ -43,11 +44,30 @@ db.exec(`
     follow_up_due TEXT,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
   );
+  CREATE TABLE IF NOT EXISTS audit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    event TEXT NOT NULL,
+    request_id TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+  );
 `)
 
 const app = express()
+app.disable('x-powered-by')
 app.use(cors({ origin: allowedOrigin }))
 app.use(express.json({ limit: '32kb' }))
+app.use((req, res, next) => {
+  const requestId = req.headers['x-request-id'] || crypto.randomUUID()
+  req.requestId = String(requestId).slice(0, 120)
+  res.setHeader('X-Request-ID', req.requestId)
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'DENY')
+  res.setHeader('Referrer-Policy', 'no-referrer')
+  next()
+})
 
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api')) return next()
@@ -61,6 +81,7 @@ app.use((req, res, next) => {
 })
 
 const now = () => new Date().toISOString()
+const audit = (req, event, metadata = {}) => db.prepare('INSERT INTO audit_events (user_id, event, request_id, metadata) VALUES (?, ?, ?, ?)').run(req.user?.id || null, event, req.requestId, JSON.stringify(metadata))
 const tokenFor = (user) => jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, { expiresIn: '30d' })
 const publicUser = (user) => ({ id: user.id, name: user.name, email: user.email })
 
@@ -151,6 +172,7 @@ app.post('/api/auth/signup', (req, res) => {
   try {
     const result = db.prepare('INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)').run(name.trim(), email.toLowerCase().trim(), bcrypt.hashSync(password, 10))
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid)
+    audit(req, 'auth.signup')
     res.json({ token: tokenFor(user), user: publicUser(user) })
   } catch { res.status(409).json({ error: 'An account with that email already exists.' }) }
 })
@@ -158,6 +180,7 @@ app.post('/api/auth/signup', (req, res) => {
 app.post('/api/auth/login', (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get((req.body.email || '').toLowerCase().trim())
   if (!user || !bcrypt.compareSync(req.body.password || '', user.password_hash)) return res.status(401).json({ error: 'That email and password don’t match.' })
+  audit(req, 'auth.login')
   res.json({ token: tokenFor(user), user: publicUser(user) })
 })
 app.get('/api/auth/me', auth, (req, res) => res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)) }))
@@ -172,6 +195,7 @@ app.post('/api/chat', auth, async (req, res) => {
   const content = String(req.body.content || '').trim()
   if (!content) return res.status(400).json({ error: 'Message is empty.' })
   db.prepare("INSERT INTO messages (user_id, role, content) VALUES (?, 'user', ?)").run(req.user.id, content)
+  audit(req, 'chat.message', { content_length: content.length })
   const storyline = extractStoryline(req.user.id, content)
   const context = relevantStorylines(req.user.id, content)
   let reply
@@ -205,10 +229,12 @@ app.put('/api/storylines/:id', auth, (req, res) => {
   const result = db.prepare('UPDATE storylines SET topic = COALESCE(?, topic), summary = COALESCE(?, summary), status = COALESCE(?, status), source_quotes = COALESCE(?, source_quotes), last_updated_at = ? WHERE id = ? AND user_id = ?')
     .run(topic, summary, status, source_quotes ? JSON.stringify(source_quotes) : null, now(), req.params.id, req.user.id)
   if (!result.changes) return res.status(404).json({ error: 'Memory not found.' })
+  audit(req, 'memory.update', { storyline_id: Number(req.params.id) })
   res.json({ storyline: parseStoryline(db.prepare('SELECT * FROM storylines WHERE id = ?').get(req.params.id)) })
 })
 app.delete('/api/storylines/:id', auth, (req, res) => {
   db.prepare('DELETE FROM storylines WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id)
+  audit(req, 'memory.delete', { storyline_id: Number(req.params.id) })
   res.json({ ok: true })
 })
 
