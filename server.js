@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 8787
 const JWT_SECRET = process.env.JWT_SECRET || 'kindred-local-demo-secret'
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5'
 const allowedOrigin = process.env.APP_ORIGIN || `http://127.0.0.1:${PORT}`
-const requestWindow = new Map()
+const RETENTION_DAYS = Math.max(30, Number(process.env.RETENTION_DAYS || 365))
 if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) throw new Error('JWT_SECRET must be configured in production.')
 const db = new Database(path.join(__dirname, 'kindred.db'))
 db.pragma('journal_mode = WAL')
@@ -71,6 +71,11 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
   );
+  CREATE TABLE IF NOT EXISTS rate_limits (
+    key TEXT PRIMARY KEY,
+    window_started_at INTEGER NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0
+  );
 `)
 
 const userColumns = db.prepare('PRAGMA table_info(users)').all().map(column => column.name)
@@ -93,11 +98,11 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api')) return next()
   const key = req.ip || 'unknown'
-  const current = requestWindow.get(key) || { start: Date.now(), count: 0 }
-  if (Date.now() - current.start > 60_000) { current.start = Date.now(); current.count = 0 }
-  current.count += 1
-  requestWindow.set(key, current)
-  if (current.count > 120) return res.status(429).json({ error: 'Too many requests. Please try again shortly.' })
+  const minute = Math.floor(Date.now() / 60_000) * 60_000
+  const current = db.prepare('SELECT * FROM rate_limits WHERE key = ?').get(key)
+  if (!current || current.window_started_at !== minute) db.prepare('INSERT INTO rate_limits (key, window_started_at, request_count) VALUES (?, ?, 1) ON CONFLICT(key) DO UPDATE SET window_started_at = excluded.window_started_at, request_count = 1').run(key, minute)
+  else if (current.request_count >= 120) return res.status(429).json({ error: 'Too many requests. Please try again shortly.' })
+  else db.prepare('UPDATE rate_limits SET request_count = request_count + 1 WHERE key = ?').run(key)
   next()
 })
 
@@ -112,6 +117,17 @@ const issueRefreshToken = userId => {
   return token
 }
 const revokeRefreshToken = token => db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL').run(now(), hashToken(token))
+const runRetentionCleanup = () => {
+  const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString()
+  db.transaction(() => {
+    db.prepare('DELETE FROM audit_events WHERE created_at < ?').run(cutoff)
+    db.prepare('DELETE FROM refresh_tokens WHERE expires_at < ? OR revoked_at < ?').run(now(), cutoff)
+    db.prepare('DELETE FROM password_reset_tokens WHERE expires_at < ? OR used_at < ?').run(now(), cutoff)
+    db.prepare('DELETE FROM rate_limits WHERE window_started_at < ?').run(Date.now() - 120_000)
+  })()
+}
+runRetentionCleanup()
+setInterval(runRetentionCleanup, 24 * 60 * 60 * 1000).unref()
 
 function auth(req, res, next) {
   const header = req.headers.authorization || ''

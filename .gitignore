@@ -2,3 +2,4 @@ node_modules/
 dist/
 kindred.db*
 .env
+backups/
