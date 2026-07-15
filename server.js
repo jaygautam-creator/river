@@ -313,10 +313,30 @@ app.delete('/api/privacy/account', auth, (req, res) => {
   res.json({ ok: true })
 })
 app.get('/api/health', (req, res) => res.json({ ok: true, service: 'river', model: Boolean(process.env.OPENAI_API_KEY) ? OPENAI_MODEL : 'local-fallback' }))
+app.get('/api/readiness', (req, res) => {
+  const checks = { database: Boolean(db.open), jwt_secret: process.env.NODE_ENV !== 'production' || Boolean(process.env.JWT_SECRET), model_fallback: true }
+  const ready = Object.values(checks).every(Boolean)
+  res.status(ready ? 200 : 503).json({ ready, checks })
+})
+app.get('/api/metrics', auth, (req, res) => {
+  const messages = db.prepare('SELECT COUNT(*) AS count FROM messages WHERE user_id = ?').get(req.user.id).count
+  const memories = db.prepare('SELECT COUNT(*) AS count FROM storylines WHERE user_id = ?').get(req.user.id).count
+  const proposals = db.prepare("SELECT COUNT(*) AS count FROM memory_proposals WHERE user_id = ? AND status = 'pending'").get(req.user.id).count
+  res.json({ messages, memories, pending_proposals: proposals })
+})
 
 app.get('/api/conversation', auth, (req, res) => {
   const messages = db.prepare('SELECT id, role, content, created_at FROM messages WHERE user_id = ? ORDER BY id ASC').all(req.user.id)
   res.json({ messages, storylines: getStorylines(req.user.id), proposals: getProposals(req.user.id) })
+})
+app.get('/api/search', auth, (req, res) => {
+  const query = String(req.query.q || '').trim()
+  if (query.length < 2) return res.json({ messages: [], storylines: [] })
+  const pattern = `%${query.replaceAll('%', '\\%').replaceAll('_', '\\_')}%`
+  const messages = db.prepare("SELECT id, role, content, created_at FROM messages WHERE user_id = ? AND content LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 50").all(req.user.id, pattern)
+  const storylines = db.prepare("SELECT * FROM storylines WHERE user_id = ? AND (topic LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\') ORDER BY last_updated_at DESC LIMIT 25").all(req.user.id, pattern, pattern).map(parseStoryline)
+  audit(req, 'search.query', { query_length: query.length, result_count: messages.length + storylines.length })
+  res.json({ messages, storylines })
 })
 
 app.get('/api/memory/proposals', auth, (req, res) => res.json({ proposals: getProposals(req.user.id) }))
