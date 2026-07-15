@@ -10,8 +10,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = process.env.PORT || 8787
 const JWT_SECRET = process.env.JWT_SECRET || 'kindred-local-demo-secret'
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5'
-const allowedOrigin = process.env.APP_ORIGIN || true
+const allowedOrigin = process.env.APP_ORIGIN || `http://127.0.0.1:${PORT}`
 const requestWindow = new Map()
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) throw new Error('JWT_SECRET must be configured in production.')
 const db = new Database(path.join(__dirname, 'kindred.db'))
 db.pragma('journal_mode = WAL')
 db.exec(`
