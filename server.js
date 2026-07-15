@@ -76,6 +76,18 @@ db.exec(`
     window_started_at INTEGER NOT NULL,
     request_count INTEGER NOT NULL DEFAULT 0
   );
+  CREATE TABLE IF NOT EXISTS memory_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    topic TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    source_quote TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TEXT,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
 `)
 
 const userColumns = db.prepare('PRAGMA table_info(users)').all().map(column => column.name)
@@ -141,20 +153,28 @@ function getStorylines(userId) {
   return db.prepare("SELECT * FROM storylines WHERE user_id = ? ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'stale' THEN 1 ELSE 2 END, last_updated_at DESC").all(userId).map(parseStoryline)
 }
 function parseStoryline(row) { return { ...row, source_quotes: JSON.parse(row.source_quotes || '[]') } }
+function getProposals(userId) { return db.prepare("SELECT * FROM memory_proposals WHERE user_id = ? AND status = 'pending' ORDER BY created_at DESC").all(userId) }
+
+const memoryRules = [
+  { match: ['lisbon'], topic: 'The Lisbon idea', summary: 'You are planning a two-week Lisbon trip for late summer, with a tiny notebook and no over-planned itinerary.' },
+  { match: ['work', 'job', 'interview', 'client', 'promotion'], topic: 'Work & direction', summary: 'Navigating a work decision or professional next step.' },
+  { match: ['friend', 'partner', 'date', 'relationship', 'someone important'], topic: 'People on your mind', summary: 'Something is unfolding with someone important.' },
+  { match: ['trip', 'travel', 'visit', 'flight', 'weekend away'], topic: 'A trip to look forward to', summary: 'Making plans for a trip or time away.' },
+  { match: ['sleep', 'tired', 'energy', 'morning', 'routine'], topic: 'Energy & routine', summary: 'Trying to find a steadier rhythm and protect your energy.' },
+  { match: ['learn', 'build', 'project', 'idea', 'write', 'creative'], topic: 'The thing you are making', summary: 'A personal project or idea you want to keep moving.' }
+]
+function detectMemoryProposal(content) {
+  const lower = content.toLowerCase()
+  const rule = memoryRules.find(r => r.match.some(word => lower.includes(word)))
+  if (!rule || content.length < 45) return null
+  return { ...rule, source_quote: content, confidence: 0.82 }
+}
 
 // A deterministic local extractor keeps the product fully demoable without an API key.
 // If OPENAI_API_KEY is configured, this is the seam to replace with a structured extractor.
 function extractStoryline(userId, content) {
   const lower = content.toLowerCase()
-  const rules = [
-    { match: ['lisbon'], topic: 'The Lisbon idea', summary: 'You are planning a two-week Lisbon trip for late summer, with a tiny notebook and no over-planned itinerary.' },
-    { match: ['work', 'job', 'interview', 'client', 'promotion'], topic: 'Work & direction', summary: 'Navigating a work decision or professional next step.' },
-    { match: ['friend', 'partner', 'date', 'relationship', 'someone important'], topic: 'People on your mind', summary: 'Something is unfolding with someone important.' },
-    { match: ['trip', 'travel', 'visit', 'flight', 'weekend away'], topic: 'A trip to look forward to', summary: 'Making plans for a trip or time away.' },
-    { match: ['sleep', 'tired', 'energy', 'morning', 'routine'], topic: 'Energy & routine', summary: 'Trying to find a steadier rhythm and protect your energy.' },
-    { match: ['learn', 'build', 'project', 'idea', 'write', 'creative'], topic: 'The thing you are making', summary: 'A personal project or idea you want to keep moving.' }
-  ]
-  const rule = rules.find(r => r.match.some(word => lower.includes(word)))
+  const rule = memoryRules.find(r => r.match.some(word => lower.includes(word)))
   if (!rule && content.length < 45) return null
   const existing = db.prepare("SELECT * FROM storylines WHERE user_id = ? AND status != 'resolved' ORDER BY last_updated_at DESC").all(userId)
   const match = rule ? existing.find(s => s.topic === rule.topic) : null
@@ -296,7 +316,33 @@ app.get('/api/health', (req, res) => res.json({ ok: true, service: 'river', mode
 
 app.get('/api/conversation', auth, (req, res) => {
   const messages = db.prepare('SELECT id, role, content, created_at FROM messages WHERE user_id = ? ORDER BY id ASC').all(req.user.id)
-  res.json({ messages, storylines: getStorylines(req.user.id) })
+  res.json({ messages, storylines: getStorylines(req.user.id), proposals: getProposals(req.user.id) })
+})
+
+app.get('/api/memory/proposals', auth, (req, res) => res.json({ proposals: getProposals(req.user.id) }))
+app.post('/api/memory/proposals/:id/approve', auth, (req, res) => {
+  const proposal = db.prepare("SELECT * FROM memory_proposals WHERE id = ? AND user_id = ? AND status = 'pending'").get(req.params.id, req.user.id)
+  if (!proposal) return res.status(404).json({ error: 'Memory proposal not found.' })
+  const existing = db.prepare("SELECT * FROM storylines WHERE user_id = ? AND topic = ? AND status != 'resolved'").get(req.user.id, proposal.topic)
+  const stamp = now()
+  let storyline
+  if (existing) {
+    const quotes = JSON.parse(existing.source_quotes || '[]'); if (!quotes.includes(proposal.source_quote)) quotes.push(proposal.source_quote)
+    db.prepare("UPDATE storylines SET summary = ?, source_quotes = ?, status = 'open', last_updated_at = ? WHERE id = ?").run(proposal.summary, JSON.stringify(quotes.slice(-4)), stamp, existing.id)
+    storyline = parseStoryline(db.prepare('SELECT * FROM storylines WHERE id = ?').get(existing.id))
+  } else {
+    const result = db.prepare('INSERT INTO storylines (user_id, topic, summary, source_quotes, first_mentioned_at, last_updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(req.user.id, proposal.topic, proposal.summary, JSON.stringify([proposal.source_quote]), stamp, stamp)
+    storyline = parseStoryline(db.prepare('SELECT * FROM storylines WHERE id = ?').get(result.lastInsertRowid))
+  }
+  db.prepare("UPDATE memory_proposals SET status = 'approved', resolved_at = ? WHERE id = ?").run(stamp, proposal.id)
+  audit(req, 'memory.proposal_approved', { proposal_id: proposal.id })
+  res.json({ storyline, proposals: getProposals(req.user.id), storylines: getStorylines(req.user.id) })
+})
+app.post('/api/memory/proposals/:id/reject', auth, (req, res) => {
+  const result = db.prepare("UPDATE memory_proposals SET status = 'rejected', resolved_at = ? WHERE id = ? AND user_id = ? AND status = 'pending'").run(now(), req.params.id, req.user.id)
+  if (!result.changes) return res.status(404).json({ error: 'Memory proposal not found.' })
+  audit(req, 'memory.proposal_rejected', { proposal_id: Number(req.params.id) })
+  res.json({ proposals: getProposals(req.user.id) })
 })
 
 app.post('/api/chat', auth, async (req, res) => {
@@ -305,7 +351,12 @@ app.post('/api/chat', auth, async (req, res) => {
   db.prepare("INSERT INTO messages (user_id, role, content) VALUES (?, 'user', ?)").run(req.user.id, content)
   audit(req, 'chat.message', { content_length: content.length })
   const memoryEnabled = Boolean(db.prepare('SELECT memory_enabled FROM users WHERE id = ?').get(req.user.id)?.memory_enabled)
-  const storyline = memoryEnabled ? extractStoryline(req.user.id, content) : null
+  const candidate = memoryEnabled ? detectMemoryProposal(content) : null
+  let proposal = null
+  if (candidate && !db.prepare("SELECT id FROM memory_proposals WHERE user_id = ? AND source_quote = ? AND status = 'pending'").get(req.user.id, content)) {
+    const result = db.prepare('INSERT INTO memory_proposals (user_id, topic, summary, source_quote, confidence) VALUES (?, ?, ?, ?, ?)').run(req.user.id, candidate.topic, candidate.summary, candidate.source_quote, candidate.confidence)
+    proposal = db.prepare('SELECT * FROM memory_proposals WHERE id = ?').get(result.lastInsertRowid)
+  }
   const context = relevantStorylines(req.user.id, content)
   let reply
   try { reply = await generateReply(content, context, req.user.name) } catch (error) {
@@ -313,7 +364,7 @@ app.post('/api/chat', auth, async (req, res) => {
     reply = generateLocalReply(content, context, req.user.name)
   }
   db.prepare("INSERT INTO messages (user_id, role, content) VALUES (?, 'assistant', ?)").run(req.user.id, reply)
-  res.json({ reply, storyline, storylines: getStorylines(req.user.id), context })
+  res.json({ reply, storyline: null, proposal, proposals: getProposals(req.user.id), storylines: getStorylines(req.user.id), context })
 })
 
 app.post('/api/storylines/seed', auth, (req, res) => {
