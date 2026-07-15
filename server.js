@@ -10,6 +10,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = process.env.PORT || 8787
 const JWT_SECRET = process.env.JWT_SECRET || 'kindred-local-demo-secret'
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5'
+const allowedOrigin = process.env.APP_ORIGIN || true
+const requestWindow = new Map()
 const db = new Database(path.join(__dirname, 'kindred.db'))
 db.pragma('journal_mode = WAL')
 db.exec(`
@@ -43,8 +45,19 @@ db.exec(`
 `)
 
 const app = express()
-app.use(cors())
-app.use(express.json())
+app.use(cors({ origin: allowedOrigin }))
+app.use(express.json({ limit: '32kb' }))
+
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api')) return next()
+  const key = req.ip || 'unknown'
+  const current = requestWindow.get(key) || { start: Date.now(), count: 0 }
+  if (Date.now() - current.start > 60_000) { current.start = Date.now(); current.count = 0 }
+  current.count += 1
+  requestWindow.set(key, current)
+  if (current.count > 120) return res.status(429).json({ error: 'Too many requests. Please try again shortly.' })
+  next()
+})
 
 const now = () => new Date().toISOString()
 const tokenFor = (user) => jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, { expiresIn: '30d' })
@@ -147,6 +160,7 @@ app.post('/api/auth/login', (req, res) => {
   res.json({ token: tokenFor(user), user: publicUser(user) })
 })
 app.get('/api/auth/me', auth, (req, res) => res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)) }))
+app.get('/api/health', (req, res) => res.json({ ok: true, service: 'river', model: Boolean(process.env.OPENAI_API_KEY) ? OPENAI_MODEL : 'local-fallback' }))
 
 app.get('/api/conversation', auth, (req, res) => {
   const messages = db.prepare('SELECT id, role, content, created_at FROM messages WHERE user_id = ? ORDER BY id ASC').all(req.user.id)
