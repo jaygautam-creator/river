@@ -44,7 +44,7 @@ function Auth({ onAuth }) {
   </main>
 }
 
-function Sidebar({ user, onLogout, onNew, onSeed, seeding }) {
+function Sidebar({ user, onLogout, onNew, onSeed, seeding, onPrivacy }) {
   return <aside className="sidebar">
     <div className="sidebar-top"><div className="brand"><div className="brand-mark small"><Sparkles size={14} /></div><span>river</span></div><button className="icon-button subtle" aria-label="More options"><MoreHorizontal size={18} /></button></div>
     <button className="new-thread" onClick={onNew}><Plus size={16} /> Continue thread <span>⌘ N</span></button>
@@ -52,10 +52,15 @@ function Sidebar({ user, onLogout, onNew, onSeed, seeding }) {
     <nav className="nav-list"><button className="nav-item selected"><Compass size={17} /><span>Today</span><span className="nav-count">1</span></button><button className="nav-item"><BookOpen size={17} /><span>Memory</span></button></nav>
     <div className="sidebar-thread"><div className="nav-label">Recent</div><div className="thread-row"><span className="thread-dot" /><div><strong>Today</strong><small>Just now</small></div><MoreHorizontal size={15} /></div></div>
     <div className="sidebar-bottom">
+      <button className="seed-button" onClick={onPrivacy}><Settings2 size={15} /> Privacy controls</button>
       <button className="seed-button" onClick={onSeed} disabled={seeding}><Zap size={15} /> {seeding ? 'Gathering threads…' : 'Seed a richer memory'}</button>
       <div className="account-row"><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div className="account-copy"><strong>{user.name}</strong><small>Personal space</small></div><button className="icon-button subtle" onClick={onLogout}><LogOut size={15} /></button></div>
     </div>
   </aside>
+}
+
+function PrivacyPanel({ enabled, onToggle, onClose }) {
+  return <div className="privacy-overlay"><section className="privacy-card" role="dialog" aria-modal="true" aria-label="Privacy controls"><div className="panel-head"><div><div className="eyebrow"><span className="eyebrow-dot" /> your control</div><h2>Privacy controls</h2></div><button className="icon-button" aria-label="Close privacy controls" onClick={onClose}><X size={18} /></button></div><p className="panel-intro">River only keeps storylines when memory is enabled. You can turn this off at any time.</p><label className="privacy-toggle"><span><strong>Remember what matters</strong><small>Allow River to create and update short storyline summaries.</small></span><input type="checkbox" checked={enabled} onChange={e => onToggle(e.target.checked)} /></label><div className="privacy-actions"><button className="ghost-button" onClick={onClose}>Done</button></div></section></div>
 }
 
 function Message({ message }) {
@@ -99,8 +104,10 @@ function App({ user, onLogout }) {
   const [busy, setBusy] = useState(false)
   const [seeding, setSeeding] = useState(false)
   const [mode, setMode] = useState('text')
+  const [privacyOpen, setPrivacyOpen] = useState(false)
+  const [memoryEnabled, setMemoryEnabled] = useState(true)
   const chatRef = useRef(null)
-  useEffect(() => { api('/api/conversation').then(data => { setMessages(data.messages); setStorylines(data.storylines) }).catch(() => {}) }, [])
+  useEffect(() => { api('/api/conversation').then(data => { setMessages(data.messages); setStorylines(data.storylines) }).catch(() => {}); api('/api/privacy/preferences').then(data => setMemoryEnabled(data.memory_enabled)).catch(() => {}) }, [])
   useEffect(() => {
     const chat = chatRef.current
     if (!chat) return
@@ -111,9 +118,10 @@ function App({ user, onLogout }) {
   const seed = async () => { setSeeding(true); try { const data = await api('/api/storylines/seed', { method: 'POST' }); setStorylines(data.storylines); setMemoryOpen(true) } finally { setSeeding(false) } }
   const update = async (id, draft) => { const data = await api(`/api/storylines/${id}`, { method: 'PUT', body: JSON.stringify(draft) }); setStorylines(s => s.map(x => x.id === id ? data.storyline : x)) }
   const remove = async id => { await api(`/api/storylines/${id}`, { method: 'DELETE' }); setStorylines(s => s.filter(x => x.id !== id)) }
+  const toggleMemory = async enabled => { await api('/api/privacy/preferences', { method: 'PUT', body: JSON.stringify({ memory_enabled: enabled }) }); setMemoryEnabled(enabled); if (!enabled) setStorylines([]) }
   const newThread = () => { setMode('text'); setMemoryOpen(false); requestAnimationFrame(() => document.querySelector('.composer textarea')?.focus()) }
   const hasMessages = messages.length > 0
-  return <div className="app-shell"><Sidebar user={user} onLogout={onLogout} onNew={newThread} onSeed={seed} seeding={seeding} /><main className="main-column"><header className="topbar"><div className="mobile-brand"><div className="brand-mark small"><Sparkles size={14} /></div>kindred</div><div className="session-label"><span className="live-dot" /> ongoing thread <ChevronDown size={14} /></div><div className="top-actions"><button className="icon-button" aria-label="Search"><Search size={17} /></button><button className={`memory-toggle ${memoryOpen ? 'active' : ''}`} onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen}><BookOpen size={15} /> <span>Memory</span><span className="memory-number">{storylines.length}</span></button><button className="icon-button mobile-menu" aria-label="Open menu"><Menu size={18} /></button></div></header>{mode === 'voice' ? <VoiceScreen onBack={() => setMode('text')} /> : <><section ref={chatRef} className={`chat-area ${hasMessages ? 'has-messages' : ''}`}>{hasMessages ? <div className="message-list">{messages.map(m => <Message key={m.id} message={m} />)}{busy && <div className="thinking"><span className="mini-spark"><Sparkles size={11} /></span><span className="thinking-label">Kindred is thinking</span><i /><i /><i /></div>}</div> : <EmptyState user={user} onSeed={seed} />}</section><Composer onSend={send} busy={busy} mode={mode} setMode={setMode} /></>}</main>{memoryOpen && <><button className="memory-backdrop" aria-label="Dismiss memory overlay" onClick={() => setMemoryOpen(false)} /><MemoryPanel storylines={storylines} onUpdate={update} onDelete={remove} onClose={() => setMemoryOpen(false)} /></>}</div>
+  return <><div className="app-shell"><Sidebar user={user} onLogout={onLogout} onNew={newThread} onSeed={seed} seeding={seeding} onPrivacy={() => setPrivacyOpen(true)} /><main className="main-column"><header className="topbar"><div className="mobile-brand"><div className="brand-mark small"><Sparkles size={14} /></div>River</div><div className="session-label"><span className="live-dot" /> ongoing thread <ChevronDown size={14} /></div><div className="top-actions"><button className="icon-button" aria-label="Search"><Search size={17} /></button><button className={`memory-toggle ${memoryOpen ? 'active' : ''}`} onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen}><BookOpen size={15} /> <span>Memory</span><span className="memory-number">{storylines.length}</span></button><button className="icon-button mobile-menu" aria-label="Open menu"><Menu size={18} /></button></div></header>{mode === 'voice' ? <VoiceScreen onBack={() => setMode('text')} /> : <><section ref={chatRef} className={`chat-area ${hasMessages ? 'has-messages' : ''}`}>{hasMessages ? <div className="message-list">{messages.map(m => <Message key={m.id} message={m} />)}{busy && <div className="thinking"><span className="mini-spark"><Sparkles size={11} /></span><span className="thinking-label">River is thinking</span><i /><i /><i /></div>}</div> : <EmptyState user={user} onSeed={seed} />}</section><Composer onSend={send} busy={busy} mode={mode} setMode={setMode} /></>}</main>{memoryOpen && <><button className="memory-backdrop" aria-label="Dismiss memory overlay" onClick={() => setMemoryOpen(false)} /><MemoryPanel storylines={storylines} onUpdate={update} onDelete={remove} onClose={() => setMemoryOpen(false)} /></>}</div>{privacyOpen && <PrivacyPanel enabled={memoryEnabled} onToggle={toggleMemory} onClose={() => setPrivacyOpen(false)} />}</>
 }
 
 function Root() {
