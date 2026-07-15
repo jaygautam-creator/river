@@ -24,6 +24,14 @@ db.exec(`
     password_hash TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS threads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT NOT NULL DEFAULT 'Today',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -92,6 +100,8 @@ db.exec(`
 
 const userColumns = db.prepare('PRAGMA table_info(users)').all().map(column => column.name)
 if (!userColumns.includes('memory_enabled')) db.exec('ALTER TABLE users ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1')
+const messageColumns = db.prepare('PRAGMA table_info(messages)').all().map(column => column.name)
+if (!messageColumns.includes('thread_id')) db.exec('ALTER TABLE messages ADD COLUMN thread_id INTEGER REFERENCES threads(id) ON DELETE CASCADE')
 
 const app = express()
 app.disable('x-powered-by')
@@ -122,6 +132,18 @@ const now = () => new Date().toISOString()
 const audit = (req, event, metadata = {}) => db.prepare('INSERT INTO audit_events (user_id, event, request_id, metadata) VALUES (?, ?, ?, ?)').run(req.user?.id || null, event, req.requestId, JSON.stringify(metadata))
 const tokenFor = (user) => jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, { expiresIn: '30d' })
 const publicUser = (user) => ({ id: user.id, name: user.name, email: user.email })
+function ensureThread(userId, threadId = null) {
+  if (threadId) {
+    const existing = db.prepare('SELECT * FROM threads WHERE id = ? AND user_id = ?').get(threadId, userId)
+    if (existing) return existing
+  }
+  let thread = db.prepare('SELECT * FROM threads WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1').get(userId)
+  if (!thread) {
+    const result = db.prepare('INSERT INTO threads (user_id, title) VALUES (?, ?)').run(userId, 'Today')
+    thread = db.prepare('SELECT * FROM threads WHERE id = ?').get(result.lastInsertRowid)
+  }
+  return thread
+}
 const hashToken = token => crypto.createHash('sha256').update(token).digest('hex')
 const issueRefreshToken = userId => {
   const token = crypto.randomBytes(48).toString('base64url')
@@ -236,6 +258,7 @@ app.post('/api/auth/signup', (req, res) => {
   try {
     const result = db.prepare('INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)').run(name.trim(), email.toLowerCase().trim(), bcrypt.hashSync(password, 10))
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid)
+    ensureThread(user.id)
     audit(req, 'auth.signup')
     res.json({ token: tokenFor(user), refresh_token: issueRefreshToken(user.id), user: publicUser(user) })
   } catch { res.status(409).json({ error: 'An account with that email already exists.' }) }
@@ -326,8 +349,31 @@ app.get('/api/metrics', auth, (req, res) => {
 })
 
 app.get('/api/conversation', auth, (req, res) => {
-  const messages = db.prepare('SELECT id, role, content, created_at FROM messages WHERE user_id = ? ORDER BY id ASC').all(req.user.id)
+  const thread = ensureThread(req.user.id, req.query.thread_id)
+  db.prepare('UPDATE messages SET thread_id = ? WHERE user_id = ? AND thread_id IS NULL').run(thread.id, req.user.id)
+  const messages = db.prepare('SELECT id, role, content, created_at FROM messages WHERE user_id = ? AND thread_id = ? ORDER BY id ASC').all(req.user.id, thread.id)
   res.json({ messages, storylines: getStorylines(req.user.id), proposals: getProposals(req.user.id) })
+})
+app.get('/api/threads', auth, (req, res) => res.json({ threads: db.prepare('SELECT id, title, created_at, updated_at FROM threads WHERE user_id = ? ORDER BY updated_at DESC').all(req.user.id) }))
+app.post('/api/threads', auth, (req, res) => {
+  const title = String(req.body?.title || 'New thread').trim().slice(0, 80) || 'New thread'
+  const result = db.prepare('INSERT INTO threads (user_id, title) VALUES (?, ?)').run(req.user.id, title)
+  audit(req, 'thread.create', { thread_id: result.lastInsertRowid })
+  res.json({ thread: db.prepare('SELECT id, title, created_at, updated_at FROM threads WHERE id = ?').get(result.lastInsertRowid) })
+})
+app.patch('/api/threads/:id', auth, (req, res) => {
+  const title = String(req.body?.title || '').trim().slice(0, 80)
+  if (!title) return res.status(400).json({ error: 'Thread title is required.' })
+  const result = db.prepare('UPDATE threads SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?').run(title, now(), req.params.id, req.user.id)
+  if (!result.changes) return res.status(404).json({ error: 'Thread not found.' })
+  res.json({ thread: db.prepare('SELECT id, title, created_at, updated_at FROM threads WHERE id = ?').get(req.params.id) })
+})
+app.delete('/api/threads/:id', auth, (req, res) => {
+  const count = db.prepare('SELECT COUNT(*) AS count FROM threads WHERE user_id = ?').get(req.user.id).count
+  if (count <= 1) return res.status(400).json({ error: 'A user must keep at least one thread.' })
+  const result = db.prepare('DELETE FROM threads WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id)
+  if (!result.changes) return res.status(404).json({ error: 'Thread not found.' })
+  res.json({ ok: true })
 })
 app.get('/api/search', auth, (req, res) => {
   const query = String(req.query.q || '').trim()
@@ -368,7 +414,9 @@ app.post('/api/memory/proposals/:id/reject', auth, (req, res) => {
 app.post('/api/chat', auth, async (req, res) => {
   const content = String(req.body.content || '').trim()
   if (!content) return res.status(400).json({ error: 'Message is empty.' })
-  db.prepare("INSERT INTO messages (user_id, role, content) VALUES (?, 'user', ?)").run(req.user.id, content)
+  const thread = ensureThread(req.user.id, req.body.thread_id)
+  db.prepare("INSERT INTO messages (user_id, thread_id, role, content) VALUES (?, ?, 'user', ?)").run(req.user.id, thread.id, content)
+  db.prepare('UPDATE threads SET updated_at = ? WHERE id = ?').run(now(), thread.id)
   audit(req, 'chat.message', { content_length: content.length })
   const memoryEnabled = Boolean(db.prepare('SELECT memory_enabled FROM users WHERE id = ?').get(req.user.id)?.memory_enabled)
   const candidate = memoryEnabled ? detectMemoryProposal(content) : null
@@ -383,8 +431,8 @@ app.post('/api/chat', auth, async (req, res) => {
     console.error(error.message)
     reply = generateLocalReply(content, context, req.user.name)
   }
-  db.prepare("INSERT INTO messages (user_id, role, content) VALUES (?, 'assistant', ?)").run(req.user.id, reply)
-  res.json({ reply, storyline: null, proposal, proposals: getProposals(req.user.id), storylines: getStorylines(req.user.id), context })
+  db.prepare("INSERT INTO messages (user_id, thread_id, role, content) VALUES (?, ?, 'assistant', ?)").run(req.user.id, thread.id, reply)
+  res.json({ reply, thread, storyline: null, proposal, proposals: getProposals(req.user.id), storylines: getStorylines(req.user.id), context })
 })
 
 app.post('/api/storylines/seed', auth, (req, res) => {
