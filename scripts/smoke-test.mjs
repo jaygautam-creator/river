@@ -11,3 +11,16 @@ const html = await page.text()
 if (!html.includes('River')) throw new Error('App shell does not contain River branding')
 
 console.log(`River smoke test passed (${health.model})`)
+
+const email = `smoke-${Date.now()}@river.local`
+const signup = await fetch(`${base}/api/auth/signup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'River Smoke', email, password: 'smoke-password-123' }) })
+if (!signup.ok) throw new Error(`Signup failed: ${signup.status}`)
+const session = await signup.json()
+const authHeaders = { Authorization: `Bearer ${session.token}` }
+const preferences = await fetch(`${base}/api/privacy/preferences`, { headers: authHeaders })
+if (!preferences.ok) throw new Error(`Privacy preferences failed: ${preferences.status}`)
+const exported = await fetch(`${base}/api/privacy/export`, { headers: authHeaders })
+if (!exported.ok) throw new Error(`Privacy export failed: ${exported.status}`)
+const refreshed = await fetch(`${base}/api/auth/refresh`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ refresh_token: session.refresh_token }) })
+if (!refreshed.ok) throw new Error(`Refresh failed: ${refreshed.status}`)
+console.log('Authentication and privacy lifecycle smoke test passed')

@@ -53,7 +53,28 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
   );
+  CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+  CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
 `)
+
+const userColumns = db.prepare('PRAGMA table_info(users)').all().map(column => column.name)
+if (!userColumns.includes('memory_enabled')) db.exec('ALTER TABLE users ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1')
 
 const app = express()
 app.disable('x-powered-by')
@@ -84,6 +105,13 @@ const now = () => new Date().toISOString()
 const audit = (req, event, metadata = {}) => db.prepare('INSERT INTO audit_events (user_id, event, request_id, metadata) VALUES (?, ?, ?, ?)').run(req.user?.id || null, event, req.requestId, JSON.stringify(metadata))
 const tokenFor = (user) => jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, { expiresIn: '30d' })
 const publicUser = (user) => ({ id: user.id, name: user.name, email: user.email })
+const hashToken = token => crypto.createHash('sha256').update(token).digest('hex')
+const issueRefreshToken = userId => {
+  const token = crypto.randomBytes(48).toString('base64url')
+  db.prepare('INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)').run(userId, hashToken(token), new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString())
+  return token
+}
+const revokeRefreshToken = token => db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL').run(now(), hashToken(token))
 
 function auth(req, res, next) {
   const header = req.headers.authorization || ''
@@ -173,7 +201,7 @@ app.post('/api/auth/signup', (req, res) => {
     const result = db.prepare('INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)').run(name.trim(), email.toLowerCase().trim(), bcrypt.hashSync(password, 10))
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid)
     audit(req, 'auth.signup')
-    res.json({ token: tokenFor(user), user: publicUser(user) })
+    res.json({ token: tokenFor(user), refresh_token: issueRefreshToken(user.id), user: publicUser(user) })
   } catch { res.status(409).json({ error: 'An account with that email already exists.' }) }
 })
 
@@ -181,9 +209,73 @@ app.post('/api/auth/login', (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get((req.body.email || '').toLowerCase().trim())
   if (!user || !bcrypt.compareSync(req.body.password || '', user.password_hash)) return res.status(401).json({ error: 'That email and password don’t match.' })
   audit(req, 'auth.login')
-  res.json({ token: tokenFor(user), user: publicUser(user) })
+  res.json({ token: tokenFor(user), refresh_token: issueRefreshToken(user.id), user: publicUser(user) })
+})
+app.post('/api/auth/refresh', (req, res) => {
+  const supplied = String(req.body?.refresh_token || '')
+  const row = db.prepare('SELECT * FROM refresh_tokens WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?').get(hashToken(supplied), now())
+  if (!row) return res.status(401).json({ error: 'Refresh token is invalid or expired.' })
+  revokeRefreshToken(supplied)
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(row.user_id)
+  audit(req, 'auth.refresh')
+  res.json({ token: tokenFor(user), refresh_token: issueRefreshToken(user.id), user: publicUser(user) })
+})
+app.post('/api/auth/logout', auth, (req, res) => {
+  if (req.body?.refresh_token) revokeRefreshToken(String(req.body.refresh_token))
+  audit(req, 'auth.logout')
+  res.json({ ok: true })
+})
+app.post('/api/auth/password-reset/request', (req, res) => {
+  const email = String(req.body?.email || '').toLowerCase().trim()
+  const user = db.prepare('SELECT id FROM users WHERE email = ?').get(email)
+  if (user) {
+    const raw = crypto.randomBytes(32).toString('base64url')
+    db.prepare('INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)').run(user.id, hashToken(raw), new Date(Date.now() + 1000 * 60 * 30).toISOString())
+    audit(req, 'auth.password_reset_requested')
+    if (process.env.NODE_ENV !== 'production') console.info(`Password reset token for user ${user.id}: ${raw}`)
+  }
+  res.json({ message: 'If an account exists for that email, recovery instructions will be sent.' })
+})
+app.post('/api/auth/password-reset/complete', (req, res) => {
+  const token = String(req.body?.token || '')
+  const password = String(req.body?.password || '')
+  if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters.' })
+  const row = db.prepare('SELECT * FROM password_reset_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?').get(hashToken(token), now())
+  if (!row) return res.status(400).json({ error: 'Recovery token is invalid or expired.' })
+  db.transaction(() => {
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(password, 12), row.user_id)
+    db.prepare('UPDATE password_reset_tokens SET used_at = ? WHERE id = ?').run(now(), row.id)
+    db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').run(now(), row.user_id)
+  })()
+  audit(req, 'auth.password_reset_completed')
+  res.json({ ok: true })
 })
 app.get('/api/auth/me', auth, (req, res) => res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)) }))
+
+app.get('/api/privacy/preferences', auth, (req, res) => {
+  const user = db.prepare('SELECT memory_enabled FROM users WHERE id = ?').get(req.user.id)
+  res.json({ memory_enabled: Boolean(user?.memory_enabled), retention_days: 365 })
+})
+app.put('/api/privacy/preferences', auth, (req, res) => {
+  if (typeof req.body?.memory_enabled !== 'boolean') return res.status(400).json({ error: 'memory_enabled must be boolean.' })
+  db.prepare('UPDATE users SET memory_enabled = ? WHERE id = ?').run(req.body.memory_enabled ? 1 : 0, req.user.id)
+  audit(req, 'privacy.memory_preference', { enabled: req.body.memory_enabled })
+  res.json({ memory_enabled: req.body.memory_enabled })
+})
+app.get('/api/privacy/export', auth, (req, res) => {
+  const user = db.prepare('SELECT id, name, email, created_at FROM users WHERE id = ?').get(req.user.id)
+  const messages = db.prepare('SELECT role, content, created_at FROM messages WHERE user_id = ? ORDER BY id ASC').all(req.user.id)
+  const storylines = getStorylines(req.user.id)
+  audit(req, 'privacy.export')
+  res.json({ exported_at: now(), user, messages, storylines })
+})
+app.delete('/api/privacy/account', auth, (req, res) => {
+  const password = String(req.body?.password || '')
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)
+  if (!user || !bcrypt.compareSync(password, user.password_hash)) return res.status(401).json({ error: 'Password confirmation failed.' })
+  db.prepare('DELETE FROM users WHERE id = ?').run(req.user.id)
+  res.json({ ok: true })
+})
 app.get('/api/health', (req, res) => res.json({ ok: true, service: 'river', model: Boolean(process.env.OPENAI_API_KEY) ? OPENAI_MODEL : 'local-fallback' }))
 
 app.get('/api/conversation', auth, (req, res) => {
@@ -196,7 +288,8 @@ app.post('/api/chat', auth, async (req, res) => {
   if (!content) return res.status(400).json({ error: 'Message is empty.' })
   db.prepare("INSERT INTO messages (user_id, role, content) VALUES (?, 'user', ?)").run(req.user.id, content)
   audit(req, 'chat.message', { content_length: content.length })
-  const storyline = extractStoryline(req.user.id, content)
+  const memoryEnabled = Boolean(db.prepare('SELECT memory_enabled FROM users WHERE id = ?').get(req.user.id)?.memory_enabled)
+  const storyline = memoryEnabled ? extractStoryline(req.user.id, content) : null
   const context = relevantStorylines(req.user.id, content)
   let reply
   try { reply = await generateReply(content, context, req.user.name) } catch (error) {
