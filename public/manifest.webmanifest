@@ -1,0 +1,9 @@
+{
+  "name": "River",
+  "short_name": "River",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f1e9",
+  "theme_color": "#f5f1e9",
+  "description": "A continuous, memory-aware AI companion."
+}
