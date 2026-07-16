@@ -15,6 +15,7 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5'
 const REALTIME_MODEL = process.env.REALTIME_MODEL || 'gpt-realtime'
 const allowedOrigin = process.env.APP_ORIGIN || `http://127.0.0.1:${PORT}`
 const RETENTION_DAYS = Math.max(30, Number(process.env.RETENTION_DAYS || 365))
+const isProduction = process.env.NODE_ENV === 'production'
 if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) throw new Error('JWT_SECRET must be configured in production.')
 if (process.env.NODE_ENV === 'production' && !process.env.FIELD_ENCRYPTION_KEY) throw new Error('FIELD_ENCRYPTION_KEY must be configured in production.')
 const fieldKey = crypto.createHash('sha256').update(process.env.FIELD_ENCRYPTION_KEY || JWT_SECRET).digest()
@@ -114,7 +115,8 @@ if (!refreshColumns.includes('ip_address')) db.exec('ALTER TABLE refresh_tokens 
 
 const app = express()
 app.disable('x-powered-by')
-app.use(cors({ origin: allowedOrigin }))
+app.set('trust proxy', 1)
+app.use(cors({ origin: allowedOrigin, credentials: true }))
 app.use(express.json({ limit: '32kb' }))
 app.use((req, res, next) => {
   const requestId = req.headers['x-request-id'] || crypto.randomUUID()
@@ -123,6 +125,12 @@ app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.setHeader('X-Frame-Options', 'DENY')
   res.setHeader('Referrer-Policy', 'no-referrer')
+  res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), microphone=(self)')
+  if (isProduction) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+  next()
+})
+app.use((req, res, next) => {
+  if (isProduction && process.env.ENFORCE_HTTPS !== 'false' && req.path.startsWith('/api') && !req.secure) return res.status(400).json({ error: 'HTTPS is required.' })
   next()
 })
 
@@ -141,6 +149,25 @@ const now = () => new Date().toISOString()
 const audit = (req, event, metadata = {}) => db.prepare('INSERT INTO audit_events (user_id, event, request_id, metadata) VALUES (?, ?, ?, ?)').run(req.user?.id || null, event, req.requestId, JSON.stringify(metadata))
 const tokenFor = (user) => jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, { expiresIn: '30d' })
 const publicUser = (user) => ({ id: user.id, name: user.name, email: user.email, mfa_enabled: Boolean(user.mfa_enabled_at) })
+const readCookie = (req, name) => String(req.headers.cookie || '').split(';').map(part => part.trim()).find(part => part.startsWith(`${name}=`))?.slice(name.length + 1)
+const cookieOptions = (httpOnly = true) => ({ httpOnly, secure: isProduction, sameSite: 'lax', path: '/', maxAge: 1000 * 60 * 60 * 24 * 30 })
+const setSessionCookies = (res, token, refreshToken) => {
+  const csrfToken = crypto.randomBytes(32).toString('base64url')
+  res.cookie('river_access', token, cookieOptions(true))
+  res.cookie('river_refresh', refreshToken, cookieOptions(true))
+  res.cookie('river_csrf', csrfToken, cookieOptions(false))
+}
+const clearSessionCookies = res => ['river_access', 'river_refresh', 'river_csrf'].forEach(name => res.clearCookie(name, { httpOnly: name !== 'river_csrf', secure: isProduction, sameSite: 'lax', path: '/' }))
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api') || ['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next()
+  const cookieSession = readCookie(req, 'river_access') || readCookie(req, 'river_refresh')
+  const exempt = ['/api/auth/signup', '/api/auth/login', '/api/auth/password-reset/request', '/api/auth/password-reset/complete']
+  if (!cookieSession || exempt.includes(req.path)) return next()
+  const cookieToken = readCookie(req, 'river_csrf') || ''
+  const headerToken = String(req.headers['x-csrf-token'] || '')
+  if (!cookieToken || cookieToken.length !== headerToken.length || !crypto.timingSafeEqual(Buffer.from(cookieToken), Buffer.from(headerToken))) return res.status(403).json({ error: 'Your session could not be verified. Refresh and try again.' })
+  next()
+})
 function ensureThread(userId, threadId = null) {
   if (threadId) {
     const existing = db.prepare('SELECT * FROM threads WHERE id = ? AND user_id = ?').get(threadId, userId)
@@ -165,6 +192,12 @@ const issueRefreshToken = (userId, req) => {
   db.prepare('INSERT INTO refresh_tokens (user_id, token_hash, expires_at, user_agent, ip_address) VALUES (?, ?, ?, ?, ?)').run(userId, hashToken(token), new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString(), String(req?.headers['user-agent'] || '').slice(0, 240), String(req?.ip || '').slice(0, 64))
   return token
 }
+const respondSession = (res, user, req) => {
+  const token = tokenFor(user)
+  const refreshToken = issueRefreshToken(user.id, req)
+  setSessionCookies(res, token, refreshToken)
+  res.json({ token, refresh_token: refreshToken, user: publicUser(user) })
+}
 const encryptField = value => { const iv = crypto.randomBytes(12); const cipher = crypto.createCipheriv('aes-256-gcm', fieldKey, iv); const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]); return `${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${ciphertext.toString('base64url')}` }
 const decryptField = value => { const [iv, tag, ciphertext] = String(value || '').split('.').map(x => Buffer.from(x, 'base64url')); const decipher = crypto.createDecipheriv('aes-256-gcm', fieldKey, iv); decipher.setAuthTag(tag); return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8') }
 const verifyMfa = (user, token) => { try { if (!user?.mfa_secret || !/^\d{6}$/.test(String(token || ''))) return false; return new OTPAuth.TOTP({ issuer: 'River', label: user.email, secret: OTPAuth.Secret.fromBase32(decryptField(user.mfa_secret)), algorithm: 'SHA1', digits: 6, period: 30 }).validate({ token: String(token), window: 1 }) !== null } catch { return false } }
@@ -183,8 +216,9 @@ setInterval(runRetentionCleanup, 24 * 60 * 60 * 1000).unref()
 
 function auth(req, res, next) {
   const header = req.headers.authorization || ''
+  const token = header.startsWith('Bearer ') ? header.slice(7) : readCookie(req, 'river_access')
   try {
-    req.user = jwt.verify(header.replace('Bearer ', ''), JWT_SECRET)
+    req.user = jwt.verify(token, JWT_SECRET)
     next()
   } catch { res.status(401).json({ error: 'Please sign in again.' }) }
 }
@@ -278,7 +312,7 @@ app.post('/api/auth/signup', (req, res) => {
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid)
     ensureThread(user.id)
     audit(req, 'auth.signup')
-    res.json({ token: tokenFor(user), refresh_token: issueRefreshToken(user.id, req), user: publicUser(user) })
+    respondSession(res, user, req)
   } catch { res.status(409).json({ error: 'An account with that email already exists.' }) }
 })
 
@@ -287,19 +321,21 @@ app.post('/api/auth/login', (req, res) => {
   if (!user || !bcrypt.compareSync(req.body.password || '', user.password_hash)) return res.status(401).json({ error: 'That email and password don’t match.' })
   if (user.mfa_enabled_at && !verifyMfa(user, req.body?.otp)) return res.status(401).json({ error: 'Enter the current code from your authenticator app.', mfa_required: true })
   audit(req, 'auth.login')
-  res.json({ token: tokenFor(user), refresh_token: issueRefreshToken(user.id, req), user: publicUser(user) })
+  respondSession(res, user, req)
 })
 app.post('/api/auth/refresh', (req, res) => {
-  const supplied = String(req.body?.refresh_token || '')
+  const supplied = String(req.body?.refresh_token || readCookie(req, 'river_refresh') || '')
   const row = db.prepare('SELECT * FROM refresh_tokens WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?').get(hashToken(supplied), now())
   if (!row) return res.status(401).json({ error: 'Refresh token is invalid or expired.' })
   revokeRefreshToken(supplied)
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(row.user_id)
   audit(req, 'auth.refresh')
-  res.json({ token: tokenFor(user), refresh_token: issueRefreshToken(user.id, req), user: publicUser(user) })
+  respondSession(res, user, req)
 })
 app.post('/api/auth/logout', auth, (req, res) => {
-  if (req.body?.refresh_token) revokeRefreshToken(String(req.body.refresh_token))
+  const supplied = String(req.body?.refresh_token || readCookie(req, 'river_refresh') || '')
+  if (supplied) revokeRefreshToken(supplied)
+  clearSessionCookies(res)
   audit(req, 'auth.logout')
   res.json({ ok: true })
 })

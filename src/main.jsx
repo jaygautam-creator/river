@@ -4,8 +4,10 @@ import { ArrowUp, BookOpen, Check, ChevronDown, CircleHelp, Clock3, Compass, Cop
 import './styles.css'
 
 const api = async (path, options = {}) => {
+  const method = String(options.method || 'GET').toUpperCase()
+  const csrf = document.cookie.split('; ').find(value => value.startsWith('river_csrf='))?.split('=')[1]
   const token = localStorage.getItem('kindred_token')
-  const response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.headers || {}) } })
+  const response = await fetch(path, { ...options, credentials: 'include', headers: { 'Content-Type': 'application/json', ...(csrf && !['GET', 'HEAD', 'OPTIONS'].includes(method) ? { 'X-CSRF-Token': csrf } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.headers || {}) } })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(data.error || 'Something went wrong.')
   return data
@@ -23,7 +25,7 @@ function Auth({ onAuth }) {
     e.preventDefault(); setBusy(true); setError('')
     try {
       const data = await api(`/api/auth/${mode}`, { method: 'POST', body: JSON.stringify({ name, email, password, otp }) })
-      localStorage.setItem('kindred_token', data.token); onAuth(data.user)
+      localStorage.removeItem('kindred_token'); onAuth(data.user)
     } catch (err) { setError(err.message) } finally { setBusy(false) }
   }
   return <main className="auth-page">
@@ -192,8 +194,8 @@ function App({ user, onLogout }) {
 function Root() {
   const [user, setUser] = useState(null)
   const [checking, setChecking] = useState(true)
-  useEffect(() => { if (!localStorage.getItem('kindred_token')) return setChecking(false); api('/api/auth/me').then(d => setUser(d.user)).catch(() => localStorage.removeItem('kindred_token')).finally(() => setChecking(false)) }, [])
-  const logout = () => { localStorage.removeItem('kindred_token'); setUser(null) }
+  useEffect(() => { api('/api/auth/me').then(d => setUser(d.user)).catch(() => localStorage.removeItem('kindred_token')).finally(() => setChecking(false)) }, [])
+  const logout = async () => { try { await api('/api/auth/logout', { method: 'POST', body: '{}' }) } catch {} finally { localStorage.removeItem('kindred_token'); setUser(null) } }
   if (checking) return <div className="loading-screen"><div className="brand-mark"><Sparkles size={18} /></div><Loader2 className="spin" size={18} /></div>
   return user ? <App user={user} onLogout={logout} /> : <Auth onAuth={setUser} />
 }
