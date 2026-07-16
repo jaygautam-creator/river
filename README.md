@@ -20,7 +20,7 @@ docker build -t river .
 docker run --rm -p 8787:8787 -v river-data:/app/data -e DATABASE_PATH=/app/data/river.db -e JWT_SECRET='replace-with-a-long-random-secret' river
 ```
 
-Set `NODE_ENV=production`, a unique `JWT_SECRET`, and production CORS settings before exposing River publicly. The included container is a deployment interface, not a substitute for managed database backups, TLS termination, key management, or an independent security review.
+Set `NODE_ENV=production`, unique `JWT_SECRET` and `FIELD_ENCRYPTION_KEY` values, and production CORS settings before exposing River publicly. `FIELD_ENCRYPTION_KEY` encrypts authenticator-app MFA secrets at rest and must be independently rotated from the JWT secret. The included container is a deployment interface, not a substitute for managed database backups, TLS termination, key management, or an independent security review.
 
 ## Current state
 
@@ -33,6 +33,7 @@ Set `NODE_ENV=production`, a unique `JWT_SECRET`, and production CORS settings b
 - User-controlled memory proposals, privacy preferences, and JSON data export.
 - Voice permission/session readiness UI with clear failure and retry states; a server-side Realtime session provider still needs to be configured.
 - Health, readiness, and authenticated metrics endpoints plus CI build/audit checks.
+- Authenticator-app MFA, refresh-session device listing/revocation, and transactional password-reset delivery interfaces.
 
 ## Next build priorities
 

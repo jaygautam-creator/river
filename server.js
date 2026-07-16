@@ -6,6 +6,7 @@ import Database from 'better-sqlite3'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import crypto from 'crypto'
+import * as OTPAuth from 'otpauth'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = process.env.PORT || 8787
@@ -15,6 +16,8 @@ const REALTIME_MODEL = process.env.REALTIME_MODEL || 'gpt-realtime'
 const allowedOrigin = process.env.APP_ORIGIN || `http://127.0.0.1:${PORT}`
 const RETENTION_DAYS = Math.max(30, Number(process.env.RETENTION_DAYS || 365))
 if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) throw new Error('JWT_SECRET must be configured in production.')
+if (process.env.NODE_ENV === 'production' && !process.env.FIELD_ENCRYPTION_KEY) throw new Error('FIELD_ENCRYPTION_KEY must be configured in production.')
+const fieldKey = crypto.createHash('sha256').update(process.env.FIELD_ENCRYPTION_KEY || JWT_SECRET).digest()
 const db = new Database(process.env.DATABASE_PATH || path.join(__dirname, 'kindred.db'))
 db.pragma('journal_mode = WAL')
 db.exec(`
@@ -101,8 +104,13 @@ db.exec(`
 
 const userColumns = db.prepare('PRAGMA table_info(users)').all().map(column => column.name)
 if (!userColumns.includes('memory_enabled')) db.exec('ALTER TABLE users ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1')
+if (!userColumns.includes('mfa_secret')) db.exec('ALTER TABLE users ADD COLUMN mfa_secret TEXT')
+if (!userColumns.includes('mfa_enabled_at')) db.exec('ALTER TABLE users ADD COLUMN mfa_enabled_at TEXT')
 const messageColumns = db.prepare('PRAGMA table_info(messages)').all().map(column => column.name)
 if (!messageColumns.includes('thread_id')) db.exec('ALTER TABLE messages ADD COLUMN thread_id INTEGER REFERENCES threads(id) ON DELETE CASCADE')
+const refreshColumns = db.prepare('PRAGMA table_info(refresh_tokens)').all().map(column => column.name)
+if (!refreshColumns.includes('user_agent')) db.exec('ALTER TABLE refresh_tokens ADD COLUMN user_agent TEXT')
+if (!refreshColumns.includes('ip_address')) db.exec('ALTER TABLE refresh_tokens ADD COLUMN ip_address TEXT')
 
 const app = express()
 app.disable('x-powered-by')
@@ -132,7 +140,7 @@ app.use((req, res, next) => {
 const now = () => new Date().toISOString()
 const audit = (req, event, metadata = {}) => db.prepare('INSERT INTO audit_events (user_id, event, request_id, metadata) VALUES (?, ?, ?, ?)').run(req.user?.id || null, event, req.requestId, JSON.stringify(metadata))
 const tokenFor = (user) => jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, { expiresIn: '30d' })
-const publicUser = (user) => ({ id: user.id, name: user.name, email: user.email })
+const publicUser = (user) => ({ id: user.id, name: user.name, email: user.email, mfa_enabled: Boolean(user.mfa_enabled_at) })
 function ensureThread(userId, threadId = null) {
   if (threadId) {
     const existing = db.prepare('SELECT * FROM threads WHERE id = ? AND user_id = ?').get(threadId, userId)
@@ -146,11 +154,20 @@ function ensureThread(userId, threadId = null) {
   return thread
 }
 const hashToken = token => crypto.createHash('sha256').update(token).digest('hex')
-const issueRefreshToken = userId => {
+async function sendTransactionalEmail({ to, subject, text }) {
+  if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM) return false
+  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: process.env.EMAIL_FROM, to: [to], subject, text }) })
+  if (!response.ok) throw new Error(`Email provider failed (${response.status}).`)
+  return true
+}
+const issueRefreshToken = (userId, req) => {
   const token = crypto.randomBytes(48).toString('base64url')
-  db.prepare('INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)').run(userId, hashToken(token), new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString())
+  db.prepare('INSERT INTO refresh_tokens (user_id, token_hash, expires_at, user_agent, ip_address) VALUES (?, ?, ?, ?, ?)').run(userId, hashToken(token), new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString(), String(req?.headers['user-agent'] || '').slice(0, 240), String(req?.ip || '').slice(0, 64))
   return token
 }
+const encryptField = value => { const iv = crypto.randomBytes(12); const cipher = crypto.createCipheriv('aes-256-gcm', fieldKey, iv); const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]); return `${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${ciphertext.toString('base64url')}` }
+const decryptField = value => { const [iv, tag, ciphertext] = String(value || '').split('.').map(x => Buffer.from(x, 'base64url')); const decipher = crypto.createDecipheriv('aes-256-gcm', fieldKey, iv); decipher.setAuthTag(tag); return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8') }
+const verifyMfa = (user, token) => { try { if (!user?.mfa_secret || !/^\d{6}$/.test(String(token || ''))) return false; return new OTPAuth.TOTP({ issuer: 'River', label: user.email, secret: OTPAuth.Secret.fromBase32(decryptField(user.mfa_secret)), algorithm: 'SHA1', digits: 6, period: 30 }).validate({ token: String(token), window: 1 }) !== null } catch { return false } }
 const revokeRefreshToken = token => db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL').run(now(), hashToken(token))
 const runRetentionCleanup = () => {
   const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString()
@@ -261,15 +278,16 @@ app.post('/api/auth/signup', (req, res) => {
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid)
     ensureThread(user.id)
     audit(req, 'auth.signup')
-    res.json({ token: tokenFor(user), refresh_token: issueRefreshToken(user.id), user: publicUser(user) })
+    res.json({ token: tokenFor(user), refresh_token: issueRefreshToken(user.id, req), user: publicUser(user) })
   } catch { res.status(409).json({ error: 'An account with that email already exists.' }) }
 })
 
 app.post('/api/auth/login', (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get((req.body.email || '').toLowerCase().trim())
   if (!user || !bcrypt.compareSync(req.body.password || '', user.password_hash)) return res.status(401).json({ error: 'That email and password don’t match.' })
+  if (user.mfa_enabled_at && !verifyMfa(user, req.body?.otp)) return res.status(401).json({ error: 'Enter the current code from your authenticator app.', mfa_required: true })
   audit(req, 'auth.login')
-  res.json({ token: tokenFor(user), refresh_token: issueRefreshToken(user.id), user: publicUser(user) })
+  res.json({ token: tokenFor(user), refresh_token: issueRefreshToken(user.id, req), user: publicUser(user) })
 })
 app.post('/api/auth/refresh', (req, res) => {
   const supplied = String(req.body?.refresh_token || '')
@@ -278,21 +296,58 @@ app.post('/api/auth/refresh', (req, res) => {
   revokeRefreshToken(supplied)
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(row.user_id)
   audit(req, 'auth.refresh')
-  res.json({ token: tokenFor(user), refresh_token: issueRefreshToken(user.id), user: publicUser(user) })
+  res.json({ token: tokenFor(user), refresh_token: issueRefreshToken(user.id, req), user: publicUser(user) })
 })
 app.post('/api/auth/logout', auth, (req, res) => {
   if (req.body?.refresh_token) revokeRefreshToken(String(req.body.refresh_token))
   audit(req, 'auth.logout')
   res.json({ ok: true })
 })
-app.post('/api/auth/password-reset/request', (req, res) => {
+app.get('/api/auth/sessions', auth, (req, res) => {
+  const sessions = db.prepare('SELECT id, created_at, expires_at, revoked_at, user_agent, ip_address FROM refresh_tokens WHERE user_id = ? ORDER BY created_at DESC').all(req.user.id)
+  res.json({ sessions })
+})
+app.delete('/api/auth/sessions/:id', auth, (req, res) => {
+  const result = db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL').run(now(), req.params.id, req.user.id)
+  if (!result.changes) return res.status(404).json({ error: 'Active session not found.' })
+  audit(req, 'auth.session_revoked', { session_id: Number(req.params.id) })
+  res.json({ ok: true })
+})
+app.post('/api/auth/mfa/setup', auth, (req, res) => {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)
+  if (user.mfa_enabled_at) return res.status(409).json({ error: 'Multi-factor authentication is already enabled.' })
+  const secret = new OTPAuth.Secret({ size: 20 }).base32
+  const totp = new OTPAuth.TOTP({ issuer: 'River', label: user.email, secret: OTPAuth.Secret.fromBase32(secret), algorithm: 'SHA1', digits: 6, period: 30 })
+  db.prepare('UPDATE users SET mfa_secret = ? WHERE id = ?').run(encryptField(secret), user.id)
+  audit(req, 'auth.mfa_setup_started')
+  res.json({ secret, otpauth_url: totp.toString() })
+})
+app.post('/api/auth/mfa/enable', auth, (req, res) => {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)
+  if (!user?.mfa_secret || !verifyMfa(user, req.body?.otp)) return res.status(400).json({ error: 'Enter a valid authenticator code to enable MFA.' })
+  db.prepare('UPDATE users SET mfa_enabled_at = ? WHERE id = ?').run(now(), user.id)
+  audit(req, 'auth.mfa_enabled')
+  res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)) })
+})
+app.post('/api/auth/mfa/disable', auth, (req, res) => {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)
+  if (!verifyMfa(user, req.body?.otp)) return res.status(400).json({ error: 'Enter a valid authenticator code to disable MFA.' })
+  db.prepare('UPDATE users SET mfa_secret = NULL, mfa_enabled_at = NULL WHERE id = ?').run(user.id)
+  audit(req, 'auth.mfa_disabled')
+  res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)) })
+})
+app.post('/api/auth/password-reset/request', async (req, res) => {
   const email = String(req.body?.email || '').toLowerCase().trim()
   const user = db.prepare('SELECT id FROM users WHERE email = ?').get(email)
   if (user) {
     const raw = crypto.randomBytes(32).toString('base64url')
     db.prepare('INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)').run(user.id, hashToken(raw), new Date(Date.now() + 1000 * 60 * 30).toISOString())
     audit(req, 'auth.password_reset_requested')
-    if (process.env.NODE_ENV !== 'production') console.info(`Password reset token for user ${user.id}: ${raw}`)
+    const resetUrl = `${allowedOrigin}/?reset_token=${encodeURIComponent(raw)}`
+    try {
+      const delivered = await sendTransactionalEmail({ to: email, subject: 'Reset your River password', text: `Use this link within 30 minutes to reset your River password: ${resetUrl}` })
+      if (!delivered && process.env.NODE_ENV !== 'production') console.info(`Password reset token for user ${user.id}: ${raw}`)
+    } catch (error) { console.error(`Password reset email failed: ${error.message}`) }
   }
   res.json({ message: 'If an account exists for that email, recovery instructions will be sent.' })
 })

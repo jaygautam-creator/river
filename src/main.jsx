@@ -16,12 +16,13 @@ function Auth({ onAuth }) {
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [otp, setOtp] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const submit = async e => {
     e.preventDefault(); setBusy(true); setError('')
     try {
-      const data = await api(`/api/auth/${mode}`, { method: 'POST', body: JSON.stringify({ name, email, password }) })
+      const data = await api(`/api/auth/${mode}`, { method: 'POST', body: JSON.stringify({ name, email, password, otp }) })
       localStorage.setItem('kindred_token', data.token); onAuth(data.user)
     } catch (err) { setError(err.message) } finally { setBusy(false) }
   }
@@ -35,6 +36,7 @@ function Auth({ onAuth }) {
         {mode === 'signup' && <label>Your name<input value={name} onChange={e => setName(e.target.value)} placeholder="What should I call you?" required /></label>}
         <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" required /></label>
         <label>Password<input type="password" minLength="6" value={password} onChange={e => setPassword(e.target.value)} placeholder="At least 6 characters" required /></label>
+        {mode === 'login' && <label>Authenticator code <small className="field-optional">only if you enabled MFA</small><input inputMode="numeric" autoComplete="one-time-code" value={otp} onChange={e => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="123456" /></label>}
         {error && <div className="form-error">{error}</div>}
         <button className="primary-button auth-submit" disabled={busy}>{busy ? <Loader2 className="spin" size={17} /> : mode === 'signup' ? 'Begin your thread' : 'Welcome back'}<ArrowUp size={17} /></button>
       </form>
