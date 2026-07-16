@@ -14,7 +14,7 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5'
 const allowedOrigin = process.env.APP_ORIGIN || `http://127.0.0.1:${PORT}`
 const RETENTION_DAYS = Math.max(30, Number(process.env.RETENTION_DAYS || 365))
 if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) throw new Error('JWT_SECRET must be configured in production.')
-const db = new Database(path.join(__dirname, 'kindred.db'))
+const db = new Database(process.env.DATABASE_PATH || path.join(__dirname, 'kindred.db'))
 db.pragma('journal_mode = WAL')
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -379,7 +379,7 @@ app.get('/api/search', auth, (req, res) => {
   const query = String(req.query.q || '').trim()
   if (query.length < 2) return res.json({ messages: [], storylines: [] })
   const pattern = `%${query.replaceAll('%', '\\%').replaceAll('_', '\\_')}%`
-  const messages = db.prepare("SELECT id, role, content, created_at FROM messages WHERE user_id = ? AND content LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 50").all(req.user.id, pattern)
+  const messages = db.prepare("SELECT id, thread_id, role, content, created_at FROM messages WHERE user_id = ? AND content LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 50").all(req.user.id, pattern)
   const storylines = db.prepare("SELECT * FROM storylines WHERE user_id = ? AND (topic LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\') ORDER BY last_updated_at DESC LIMIT 25").all(req.user.id, pattern, pattern).map(parseStoryline)
   audit(req, 'search.query', { query_length: query.length, result_count: messages.length + storylines.length })
   res.json({ messages, storylines })

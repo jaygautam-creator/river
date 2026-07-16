@@ -1,0 +1,6 @@
+node_modules
+dist
+.git
+.env
+river.db
+npm-debug.log*

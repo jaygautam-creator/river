@@ -44,13 +44,13 @@ function Auth({ onAuth }) {
   </main>
 }
 
-function Sidebar({ user, onLogout, onNew, onSeed, seeding, onPrivacy }) {
+function Sidebar({ user, threads, activeThreadId, onSelectThread, onNew, onLogout, onSeed, seeding, onPrivacy }) {
   return <aside className="sidebar">
     <div className="sidebar-top"><div className="brand"><div className="brand-mark small"><Sparkles size={14} /></div><span>river</span></div><button className="icon-button subtle" aria-label="More options"><MoreHorizontal size={18} /></button></div>
-    <button className="new-thread" onClick={onNew}><Plus size={16} /> Continue thread <span>⌘ N</span></button>
+    <button className="new-thread" onClick={onNew}><Plus size={16} /> New thread <span>⌘ N</span></button>
     <div className="nav-label">Your space</div>
     <nav className="nav-list"><button className="nav-item selected"><Compass size={17} /><span>Today</span><span className="nav-count">1</span></button><button className="nav-item"><BookOpen size={17} /><span>Memory</span></button></nav>
-    <div className="sidebar-thread"><div className="nav-label">Recent</div><div className="thread-row"><span className="thread-dot" /><div><strong>Today</strong><small>Just now</small></div><MoreHorizontal size={15} /></div></div>
+    <div className="sidebar-thread"><div className="nav-label">Recent</div>{threads.map(thread => <button className={`thread-row ${thread.id === activeThreadId ? 'active' : ''}`} key={thread.id} onClick={() => onSelectThread(thread.id)}><span className="thread-dot" /><div><strong>{thread.title}</strong><small>{new Date(thread.updated_at).toLocaleDateString([], { month: 'short', day: 'numeric' })}</small></div></button>)}</div>
     <div className="sidebar-bottom">
       <button className="seed-button" onClick={onPrivacy}><Settings2 size={15} /> Privacy controls</button>
       <button className="seed-button" onClick={onSeed} disabled={seeding}><Zap size={15} /> {seeding ? 'Gathering threads…' : 'Seed a richer memory'}</button>
@@ -59,8 +59,8 @@ function Sidebar({ user, onLogout, onNew, onSeed, seeding, onPrivacy }) {
   </aside>
 }
 
-function PrivacyPanel({ enabled, onToggle, onClose }) {
-  return <div className="privacy-overlay"><section className="privacy-card" role="dialog" aria-modal="true" aria-label="Privacy controls"><div className="panel-head"><div><div className="eyebrow"><span className="eyebrow-dot" /> your control</div><h2>Privacy controls</h2></div><button className="icon-button" aria-label="Close privacy controls" onClick={onClose}><X size={18} /></button></div><p className="panel-intro">River only keeps storylines when memory is enabled. You can turn this off at any time.</p><label className="privacy-toggle"><span><strong>Remember what matters</strong><small>Allow River to create and update short storyline summaries.</small></span><input type="checkbox" checked={enabled} onChange={e => onToggle(e.target.checked)} /></label><div className="privacy-actions"><button className="ghost-button" onClick={onClose}>Done</button></div></section></div>
+function PrivacyPanel({ enabled, onToggle, onExport, onClose }) {
+  return <div className="privacy-overlay"><section className="privacy-card" role="dialog" aria-modal="true" aria-label="Privacy controls"><div className="panel-head"><div><div className="eyebrow"><span className="eyebrow-dot" /> your control</div><h2>Privacy controls</h2></div><button className="icon-button" aria-label="Close privacy controls" onClick={onClose}><X size={18} /></button></div><p className="panel-intro">River only keeps storylines when memory is enabled. You can turn this off at any time. Conversations are retained for 365 days unless you delete your account.</p><label className="privacy-toggle"><span><strong>Remember what matters</strong><small>Allow River to create and update short storyline summaries.</small></span><input type="checkbox" checked={enabled} onChange={e => onToggle(e.target.checked)} /></label><div className="privacy-actions"><button className="ghost-button" onClick={onExport}>Download my data</button><button className="ghost-button" onClick={onClose}>Done</button></div></section></div>
 }
 
 function Message({ message }) {
@@ -94,37 +94,81 @@ function EmptyState({ user, onSeed }) {
 }
 
 function VoiceScreen({ onBack }) {
-  return <div className="voice-screen"><button className="back-link" onClick={onBack}>← back to text</button><div className="voice-screen-inner"><div className="voice-breathe"><div className="breathe-ring ring-a" /><div className="breathe-ring ring-b" /><div className="voice-center"><Mic size={30} /></div></div><div className="eyebrow centered"><span className="eyebrow-dot" /> voice mode</div><h2>Say it out loud.</h2><p>The same River thread, without the typing. Voice will arrive here soon.</p><div className="voice-note"><Headphones size={16} /><span>Full-duplex voice with natural interruptions and shared memory.</span></div></div></div>
+  const [state, setState] = useState('idle')
+  const [message, setMessage] = useState('Check your microphone permission before beginning.')
+  const begin = async () => {
+    setState('connecting'); setMessage('Preparing a private voice session…')
+    try {
+      const session = await api('/api/voice/session')
+      if (!session.enabled) throw new Error('Voice is not configured for this River environment yet.')
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      stream.getTracks().forEach(track => track.stop())
+      setState('ready'); setMessage('Microphone access is ready. Realtime connection can begin when a session provider is configured.')
+    } catch (err) { setState('error'); setMessage(err.message || 'Voice setup could not start. Check your microphone and try again.') }
+  }
+  return <div className="voice-screen"><button className="back-link" onClick={onBack}>← back to text</button><div className="voice-screen-inner"><div className="voice-breathe"><div className="breathe-ring ring-a" /><div className="breathe-ring ring-b" /><div className="voice-center"><Mic size={30} /></div></div><div className="eyebrow centered"><span className="eyebrow-dot" /> voice mode</div><h2>Say it out loud.</h2><p>The same River thread, without the typing.</p><div className="voice-note"><Headphones size={16} /><span>{message}</span></div><button className="ghost-button voice-start" onClick={begin} disabled={state === 'connecting'}>{state === 'connecting' ? <Loader2 className="spin" size={14} /> : <Mic size={14} />} {state === 'error' ? 'Try again' : 'Check microphone'}</button></div></div>
+}
+
+function SearchPanel({ onClose, onSelectThread }) {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState({ messages: [], storylines: [] })
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    if (query.trim().length < 2) { setResults({ messages: [], storylines: [] }); return }
+    const timeout = setTimeout(async () => {
+      setBusy(true)
+      try { setResults(await api(`/api/search?q=${encodeURIComponent(query.trim())}`)) } catch { setResults({ messages: [], storylines: [] }) } finally { setBusy(false) }
+    }, 220)
+    return () => clearTimeout(timeout)
+  }, [query])
+  return <div className="privacy-overlay search-overlay"><section className="privacy-card search-card" role="dialog" aria-modal="true" aria-label="Search conversations and memories"><div className="panel-head"><div><div className="eyebrow"><span className="eyebrow-dot" /> find a thread</div><h2>Search River</h2></div><button className="icon-button" aria-label="Close search" onClick={onClose}><X size={18} /></button></div><input className="search-input" autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder="Search conversations and memories" />{busy && <div className="search-status"><Loader2 className="spin" size={15} /> Searching…</div>}{!busy && query.length >= 2 && results.messages.length + results.storylines.length === 0 && <div className="search-status">No matches yet.</div>}{results.messages.length > 0 && <div className="search-section"><strong>Conversations</strong>{results.messages.map(result => <button className="search-result" key={`m-${result.id}`} onClick={() => { onSelectThread(result.thread_id); onClose() }}><span>{result.role === 'user' ? 'You' : 'River'}</span><p>{result.content}</p></button>)}</div>}{results.storylines.length > 0 && <div className="search-section"><strong>Approved memories</strong>{results.storylines.map(result => <article className="search-result" key={`s-${result.id}`}><span>{result.topic}</span><p>{result.summary}</p></article>)}</div>}</section></div>
 }
 
 function App({ user, onLogout }) {
   const [messages, setMessages] = useState([])
   const [storylines, setStorylines] = useState([])
   const [proposals, setProposals] = useState([])
+  const [threads, setThreads] = useState([])
+  const [activeThreadId, setActiveThreadId] = useState(null)
   const [memoryOpen, setMemoryOpen] = useState(true)
   const [busy, setBusy] = useState(false)
   const [seeding, setSeeding] = useState(false)
   const [mode, setMode] = useState('text')
   const [privacyOpen, setPrivacyOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
   const [memoryEnabled, setMemoryEnabled] = useState(true)
+  const [error, setError] = useState('')
   const chatRef = useRef(null)
-  useEffect(() => { api('/api/conversation').then(data => { setMessages(data.messages); setStorylines(data.storylines); setProposals(data.proposals || []) }).catch(() => {}); api('/api/privacy/preferences').then(data => setMemoryEnabled(data.memory_enabled)).catch(() => {}) }, [])
+  const loadThread = async id => {
+    const data = await api(`/api/conversation?thread_id=${id}`)
+    setActiveThreadId(id); setMessages(data.messages); setStorylines(data.storylines); setProposals(data.proposals || []); setError('')
+  }
+  const refreshThreads = async () => {
+    const data = await api('/api/threads'); setThreads(data.threads); return data.threads
+  }
+  useEffect(() => {
+    const boot = async () => {
+      try { const [available] = await Promise.all([refreshThreads(), api('/api/privacy/preferences').then(data => setMemoryEnabled(data.memory_enabled))]); if (available[0]) await loadThread(available[0].id) } catch (err) { setError(err.message) }
+    }
+    boot()
+  }, [])
   useEffect(() => {
     const chat = chatRef.current
     if (!chat) return
     const nearBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 180
     if (nearBottom || messages.length <= 2) chat.scrollTo({ top: chat.scrollHeight, behavior: 'smooth' })
   }, [messages, busy])
-  const send = async content => { const temp = { id: `temp-${Date.now()}`, role: 'user', content, created_at: new Date().toISOString() }; setMessages(m => [...m, temp]); setBusy(true); try { const data = await api('/api/chat', { method: 'POST', body: JSON.stringify({ content }) }); setMessages(m => [...m.filter(x => x.id !== temp.id), temp, { id: `reply-${Date.now()}`, role: 'assistant', content: data.reply, created_at: new Date().toISOString() }]); setStorylines(data.storylines); setProposals(data.proposals || []) } catch (err) { setMessages(m => [...m, { id: `error-${Date.now()}`, role: 'assistant', content: err.message, created_at: new Date().toISOString() }]) } finally { setBusy(false) } }
+  const send = async content => { if (!activeThreadId) return; const temp = { id: `temp-${Date.now()}`, role: 'user', content, created_at: new Date().toISOString() }; setMessages(m => [...m, temp]); setBusy(true); setError(''); try { const data = await api('/api/chat', { method: 'POST', body: JSON.stringify({ content, thread_id: activeThreadId }) }); setMessages(m => [...m.filter(x => x.id !== temp.id), temp, { id: `reply-${Date.now()}`, role: 'assistant', content: data.reply, created_at: new Date().toISOString() }]); setStorylines(data.storylines); setProposals(data.proposals || []); await refreshThreads() } catch (err) { setMessages(m => m.filter(x => x.id !== temp.id)); setError(err.message) } finally { setBusy(false) } }
   const seed = async () => { setSeeding(true); try { const data = await api('/api/storylines/seed', { method: 'POST' }); setStorylines(data.storylines); setMemoryOpen(true) } finally { setSeeding(false) } }
   const update = async (id, draft) => { const data = await api(`/api/storylines/${id}`, { method: 'PUT', body: JSON.stringify(draft) }); setStorylines(s => s.map(x => x.id === id ? data.storyline : x)) }
   const remove = async id => { await api(`/api/storylines/${id}`, { method: 'DELETE' }); setStorylines(s => s.filter(x => x.id !== id)) }
   const approveProposal = async id => { const data = await api(`/api/memory/proposals/${id}/approve`, { method: 'POST' }); setStorylines(data.storylines); setProposals(data.proposals) }
   const rejectProposal = async id => { const data = await api(`/api/memory/proposals/${id}/reject`, { method: 'POST' }); setProposals(data.proposals) }
   const toggleMemory = async enabled => { await api('/api/privacy/preferences', { method: 'PUT', body: JSON.stringify({ memory_enabled: enabled }) }); setMemoryEnabled(enabled); if (!enabled) setStorylines([]) }
-  const newThread = () => { setMode('text'); setMemoryOpen(false); requestAnimationFrame(() => document.querySelector('.composer textarea')?.focus()) }
+  const exportData = async () => { try { const data = await api('/api/privacy/export'); const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })); const link = document.createElement('a'); link.href = url; link.download = `river-export-${new Date().toISOString().slice(0, 10)}.json`; link.click(); URL.revokeObjectURL(url) } catch (err) { setError(err.message) } }
+  const newThread = async () => { try { const data = await api('/api/threads', { method: 'POST', body: JSON.stringify({ title: 'New thread' }) }); setThreads(current => [data.thread, ...current]); setActiveThreadId(data.thread.id); setMessages([]); setProposals([]); setMode('text'); setMemoryOpen(false); setError(''); requestAnimationFrame(() => document.querySelector('.composer textarea')?.focus()) } catch (err) { setError(err.message) } }
   const hasMessages = messages.length > 0
-  return <><div className="app-shell"><Sidebar user={user} onLogout={onLogout} onNew={newThread} onSeed={seed} seeding={seeding} onPrivacy={() => setPrivacyOpen(true)} /><main className="main-column"><header className="topbar"><div className="mobile-brand"><div className="brand-mark small"><Sparkles size={14} /></div>River</div><div className="session-label"><span className="live-dot" /> ongoing thread <ChevronDown size={14} /></div><div className="top-actions"><button className="icon-button" aria-label="Search"><Search size={17} /></button><button className={`memory-toggle ${memoryOpen ? 'active' : ''}`} onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen}><BookOpen size={15} /> <span>Memory</span><span className="memory-number">{storylines.length + proposals.length}</span></button><button className="icon-button mobile-menu" aria-label="Open menu"><Menu size={18} /></button></div></header>{mode === 'voice' ? <VoiceScreen onBack={() => setMode('text')} /> : <><section ref={chatRef} className={`chat-area ${hasMessages ? 'has-messages' : ''}`}>{hasMessages ? <div className="message-list">{messages.map(m => <Message key={m.id} message={m} />)}{busy && <div className="thinking"><span className="mini-spark"><Sparkles size={11} /></span><span className="thinking-label">River is thinking</span><i /><i /><i /></div>}</div> : <EmptyState user={user} onSeed={seed} />}</section><Composer onSend={send} busy={busy} mode={mode} setMode={setMode} /></>}</main>{memoryOpen && <><button className="memory-backdrop" aria-label="Dismiss memory overlay" onClick={() => setMemoryOpen(false)} /><MemoryPanel storylines={storylines} proposals={proposals} onUpdate={update} onDelete={remove} onApprove={approveProposal} onReject={rejectProposal} onClose={() => setMemoryOpen(false)} /></>}</div>{privacyOpen && <PrivacyPanel enabled={memoryEnabled} onToggle={toggleMemory} onClose={() => setPrivacyOpen(false)} />}</>
+  return <><div className="app-shell"><Sidebar user={user} threads={threads} activeThreadId={activeThreadId} onSelectThread={loadThread} onLogout={onLogout} onNew={newThread} onSeed={seed} seeding={seeding} onPrivacy={() => setPrivacyOpen(true)} /><main className="main-column"><header className="topbar"><div className="mobile-brand"><div className="brand-mark small"><Sparkles size={14} /></div>River</div><div className="session-label"><span className="live-dot" /> ongoing thread <ChevronDown size={14} /></div><div className="top-actions"><button className="icon-button" aria-label="Search" onClick={() => setSearchOpen(true)}><Search size={17} /></button><button className={`memory-toggle ${memoryOpen ? 'active' : ''}`} onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen}><BookOpen size={15} /> <span>Memory</span><span className="memory-number">{storylines.length + proposals.length}</span></button><button className="icon-button mobile-menu" aria-label="Open menu"><Menu size={18} /></button></div></header>{mode === 'voice' ? <VoiceScreen onBack={() => setMode('text')} /> : <><section ref={chatRef} className={`chat-area ${hasMessages ? 'has-messages' : ''}`}>{hasMessages ? <div className="message-list">{messages.map(m => <Message key={m.id} message={m} />)}{busy && <div className="thinking"><span className="mini-spark"><Sparkles size={11} /></span><span className="thinking-label">River is thinking</span><i /><i /><i /></div>}</div> : <EmptyState user={user} onSeed={seed} />}</section>{error && <div className="connection-notice" role="status">{error}</div>}<Composer onSend={send} busy={busy} mode={mode} setMode={setMode} /></>}</main>{memoryOpen && <><button className="memory-backdrop" aria-label="Dismiss memory overlay" onClick={() => setMemoryOpen(false)} /><MemoryPanel storylines={storylines} proposals={proposals} onUpdate={update} onDelete={remove} onApprove={approveProposal} onReject={rejectProposal} onClose={() => setMemoryOpen(false)} /></>}</div>{privacyOpen && <PrivacyPanel enabled={memoryEnabled} onToggle={toggleMemory} onExport={exportData} onClose={() => setPrivacyOpen(false)} />}{searchOpen && <SearchPanel onClose={() => setSearchOpen(false)} onSelectThread={loadThread} />}</>
 }
 
 function Root() {
