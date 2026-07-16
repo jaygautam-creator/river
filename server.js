@@ -11,6 +11,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = process.env.PORT || 8787
 const JWT_SECRET = process.env.JWT_SECRET || 'kindred-local-demo-secret'
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5'
+const REALTIME_MODEL = process.env.REALTIME_MODEL || 'gpt-realtime'
 const allowedOrigin = process.env.APP_ORIGIN || `http://127.0.0.1:${PORT}`
 const RETENTION_DAYS = Math.max(30, Number(process.env.RETENTION_DAYS || 365))
 if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) throw new Error('JWT_SECRET must be configured in production.')
@@ -466,7 +467,23 @@ app.delete('/api/storylines/:id', auth, (req, res) => {
   res.json({ ok: true })
 })
 
-app.get('/api/voice/session', auth, (req, res) => res.json({ enabled: Boolean(process.env.OPENAI_API_KEY), message: 'Voice session handoff is ready for an OpenAI Realtime session.' }))
+app.get('/api/voice/session', auth, (req, res) => res.json({ enabled: Boolean(process.env.OPENAI_API_KEY), model: REALTIME_MODEL, message: process.env.OPENAI_API_KEY ? 'Voice is ready to connect.' : 'Voice is not configured for this environment.' }))
+app.post('/api/voice/call', auth, async (req, res) => {
+  if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'Voice is not configured for this environment.' })
+  const sdp = String(req.body?.sdp || '')
+  if (!sdp.startsWith('v=') || sdp.length > 100_000) return res.status(400).json({ error: 'A valid WebRTC offer is required.' })
+  const session = { type: 'realtime', model: REALTIME_MODEL, output_modalities: ['audio'], max_output_tokens: 512 }
+  try {
+    const form = new FormData()
+    form.append('sdp', new Blob([sdp], { type: 'application/sdp' }), 'offer.sdp')
+    form.append('session', new Blob([JSON.stringify(session)], { type: 'application/json' }), 'session.json')
+    const response = await fetch('https://api.openai.com/v1/realtime/calls', { method: 'POST', headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'X-Client-Request-Id': req.requestId }, body: form })
+    const answer = await response.text()
+    if (!response.ok) { console.error(`Realtime call failed: ${response.status}`); return res.status(502).json({ error: 'River could not start a voice session. Please try again.' }) }
+    audit(req, 'voice.session_started', { model: REALTIME_MODEL })
+    res.json({ sdp: answer, call_id: response.headers.get('location')?.split('/').pop() || null })
+  } catch (error) { console.error(`Realtime request failed: ${error.message}`); res.status(502).json({ error: 'River could not reach the voice provider. Please try again.' }) }
+})
 
 app.use(express.static(path.join(__dirname, 'dist')))
 app.get('*', (req, res, next) => req.path.startsWith('/api') ? next() : res.sendFile(path.join(__dirname, 'dist', 'index.html')))

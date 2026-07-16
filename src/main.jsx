@@ -96,17 +96,33 @@ function EmptyState({ user, onSeed }) {
 function VoiceScreen({ onBack }) {
   const [state, setState] = useState('idle')
   const [message, setMessage] = useState('Check your microphone permission before beginning.')
+  const connectionRef = useRef(null)
+  const streamRef = useRef(null)
+  const audioRef = useRef(null)
+  const stop = () => {
+    connectionRef.current?.close(); connectionRef.current = null
+    streamRef.current?.getTracks().forEach(track => track.stop()); streamRef.current = null
+    setState('idle'); setMessage('Voice session ended. Your audio is not stored by River.')
+  }
+  useEffect(() => () => { connectionRef.current?.close(); streamRef.current?.getTracks().forEach(track => track.stop()) }, [])
   const begin = async () => {
     setState('connecting'); setMessage('Preparing a private voice session…')
     try {
       const session = await api('/api/voice/session')
       if (!session.enabled) throw new Error('Voice is not configured for this River environment yet.')
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      stream.getTracks().forEach(track => track.stop())
-      setState('ready'); setMessage('Microphone access is ready. Realtime connection can begin when a session provider is configured.')
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
+      streamRef.current = stream
+      const peer = new RTCPeerConnection(); connectionRef.current = peer
+      peer.ontrack = event => { if (audioRef.current) { audioRef.current.srcObject = event.streams[0]; audioRef.current.play().catch(() => {}) } }
+      peer.onconnectionstatechange = () => { if (peer.connectionState === 'failed' || peer.connectionState === 'disconnected') { setState('error'); setMessage('Voice disconnected. You can safely try again.'); stream.getTracks().forEach(track => track.stop()) } }
+      stream.getTracks().forEach(track => peer.addTrack(track, stream))
+      const offer = await peer.createOffer(); await peer.setLocalDescription(offer)
+      const call = await api('/api/voice/call', { method: 'POST', body: JSON.stringify({ sdp: offer.sdp }) })
+      await peer.setRemoteDescription({ type: 'answer', sdp: call.sdp })
+      setState('ready'); setMessage('Connected. Speak naturally; River can be interrupted at any time.')
     } catch (err) { setState('error'); setMessage(err.message || 'Voice setup could not start. Check your microphone and try again.') }
   }
-  return <div className="voice-screen"><button className="back-link" onClick={onBack}>← back to text</button><div className="voice-screen-inner"><div className="voice-breathe"><div className="breathe-ring ring-a" /><div className="breathe-ring ring-b" /><div className="voice-center"><Mic size={30} /></div></div><div className="eyebrow centered"><span className="eyebrow-dot" /> voice mode</div><h2>Say it out loud.</h2><p>The same River thread, without the typing.</p><div className="voice-note"><Headphones size={16} /><span>{message}</span></div><button className="ghost-button voice-start" onClick={begin} disabled={state === 'connecting'}>{state === 'connecting' ? <Loader2 className="spin" size={14} /> : <Mic size={14} />} {state === 'error' ? 'Try again' : 'Check microphone'}</button></div></div>
+  return <div className="voice-screen"><button className="back-link" onClick={() => { stop(); onBack() }}>← back to text</button><div className="voice-screen-inner"><audio ref={audioRef} autoPlay /><div className="voice-breathe"><div className="breathe-ring ring-a" /><div className="breathe-ring ring-b" /><div className="voice-center"><Mic size={30} /></div></div><div className="eyebrow centered"><span className="eyebrow-dot" /> voice mode</div><h2>Say it out loud.</h2><p>The same River thread, without the typing.</p><div className="voice-note"><Headphones size={16} /><span>{message}</span></div>{state === 'ready' ? <button className="ghost-button voice-start" onClick={stop}><X size={14} /> End voice</button> : <button className="ghost-button voice-start" onClick={begin} disabled={state === 'connecting'}>{state === 'connecting' ? <Loader2 className="spin" size={14} /> : <Mic size={14} />} {state === 'error' ? 'Try again' : 'Start voice'}</button>}</div></div>
 }
 
 function SearchPanel({ onClose, onSelectThread }) {

@@ -36,7 +36,7 @@ Set `NODE_ENV=production`, a unique `JWT_SECRET`, and production CORS settings b
 
 ## Next build priorities
 
-1. Connect a secure Realtime session provider for full duplex voice, interruption handling, and transcript retention controls.
+1. Set `OPENAI_API_KEY` and `REALTIME_MODEL=gpt-realtime` in the server environment to activate the included server-proxied WebRTC voice call path. Confirm provider billing, rate limits, voice policy, and transcript-retention settings before enabling it for users.
 2. Replace the local SQLite deployment path with managed encrypted storage, backups, restore drills, and regional controls.
 3. Add browser regression coverage at mobile and desktop breakpoints, then run load/soak testing.
 4. Complete external production gates: transactional email, MFA/passkeys, independent penetration/privacy/model-safety reviews, and incident response ownership.
