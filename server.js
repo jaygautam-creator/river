@@ -300,7 +300,7 @@ function extractStoryline(userId, content) {
 }
 
 function isMemoryRecallRequest(content) {
-  return /(what (do you|can you) remember|what (did|have|i) (we )?talk|what have i (told|said|shared)|you remember|issue with|prior conversation|previous conversation|last (time|recent talk|conversation)|recent (talk|conversation)|remind me|recall)/i.test(content)
+  return /(what (do you|can you) remember|what (did|have) we talk|what have i (told|said|shared)|prior conversation|previous conversation|last (time|recent talk|conversation)|recent (talk|conversation)|remind me|recall)/i.test(content)
 }
 
 function relevantStorylines(userId, content) {
@@ -311,11 +311,7 @@ function relevantStorylines(userId, content) {
   return scored.filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 3).map(x => x.s)
 }
 
-function memoryRecallReply(storylines, sourceMessages = []) {
-  if (sourceMessages.length) {
-    const quotes = sourceMessages.slice(0, 2).map(message => `“${message.content}”`).join(' and ')
-    return `I remember you shared ${quotes}. It sounded painful and confusing, especially because these are people you care about. Is that the part you wanted to come back to?`
-  }
+function memoryRecallReply(storylines) {
   if (!storylines.length) return null
   const [latest, ...earlier] = storylines
   const lead = `I do remember the parts you asked me to keep. Most recently, ${latest.summary.charAt(0).toLowerCase()}${latest.summary.slice(1)}`
@@ -324,20 +320,10 @@ function memoryRecallReply(storylines, sourceMessages = []) {
   return `${lead} I also have ${otherTopics} in mind. Is the most recent one what you wanted to return to?`
 }
 
-function recentRelevantUserMessages(userId, content) {
-  const terms = []
-  if (/friend|them|they|people/i.test(content)) terms.push('friend')
-  if (/work|job|career|client/i.test(content)) terms.push('work')
-  if (/project|build|making/i.test(content)) terms.push('project')
-  if (!terms.length) return []
-  const rows = db.prepare("SELECT content, created_at FROM messages WHERE user_id = ? AND role = 'user' AND content LIKE ? ORDER BY id DESC LIMIT 12").all(userId, `%${terms[0]}%`)
-  return rows.filter(row => row.content !== content && row.content.length > 15 && !isMemoryRecallRequest(row.content)).slice(0, 2)
-}
-
 function isRecallContinuation(userId, threadId, content) {
   if (content.length > 160) return false
   const previousAssistant = db.prepare("SELECT content FROM messages WHERE user_id = ? AND thread_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1").get(userId, threadId)
-  return Boolean(previousAssistant && /(I do remember the parts you asked me to keep|talking about.*friends?|most recent one)/i.test(previousAssistant.content))
+  return Boolean(previousAssistant && /I do remember the parts you asked me to keep/i.test(previousAssistant.content))
 }
 
 function generateLocalReply(content, storylines, userName) {
@@ -618,7 +604,7 @@ app.post('/api/chat', auth, async (req, res) => {
   db.prepare('UPDATE threads SET updated_at = ? WHERE id = ?').run(now(), thread.id)
   audit(req, 'chat.message', { content_length: content.length })
   const memoryEnabled = Boolean(db.prepare('SELECT memory_enabled FROM users WHERE id = ?').get(req.user.id)?.memory_enabled)
-  const candidate = memoryEnabled && !isMemoryRecallRequest(content) ? await extractMemoryProposal(content) : null
+  const candidate = memoryEnabled ? await extractMemoryProposal(content) : null
   let proposal = null
   if (candidate && !db.prepare("SELECT id FROM memory_proposals WHERE user_id = ? AND (source_quote = ? OR topic = ?) AND status = 'pending'").get(req.user.id, content, candidate.topic)) {
     const result = db.prepare('INSERT INTO memory_proposals (user_id, topic, summary, source_quote, confidence) VALUES (?, ?, ?, ?, ?)').run(req.user.id, candidate.topic, candidate.summary, candidate.source_quote, candidate.confidence)
@@ -634,8 +620,7 @@ app.post('/api/chat', auth, async (req, res) => {
   }
   let reply
   let provider = configuredModelProvider()
-  const sourceMessages = (recallRequest || recallContinuation) ? recentRelevantUserMessages(req.user.id, content) : []
-  const directRecall = (recallRequest || recallContinuation) ? memoryRecallReply(context, sourceMessages) : null
+  const directRecall = (recallRequest || recallContinuation) ? memoryRecallReply(context) : null
   try { reply = directRecall || await generateReply(content, context, req.user.name) } catch (error) {
     console.error(error.message)
     provider = 'local-fallback'

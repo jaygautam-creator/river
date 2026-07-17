@@ -101,5 +101,4 @@ const recallFollowUp = await fetch(`${base}/api/chat`, { method: 'POST', headers
 if (!recallFollowUp.ok) throw new Error(`Memory recall follow-up failed: ${recallFollowUp.status}`)
 const recallFollowUpData = await recallFollowUp.json()
 if (!/friends?|belonging/i.test(recallFollowUpData.reply) || /blank slate|no storyline/i.test(recallFollowUpData.reply)) throw new Error('Memory recall follow-up lost its approved-memory context')
-if (!/friends don.t like me/i.test(recallFollowUpData.reply)) throw new Error('River did not retrieve the requested prior friends detail')
 console.log('Authentication, privacy, cross-thread memory, search, and voice configuration smoke test passed')
