@@ -110,6 +110,7 @@ db.exec(`
 
 const userColumns = db.prepare('PRAGMA table_info(users)').all().map(column => column.name)
 if (!userColumns.includes('memory_enabled')) db.exec('ALTER TABLE users ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1')
+if (!userColumns.includes('retention_days')) db.exec('ALTER TABLE users ADD COLUMN retention_days INTEGER NOT NULL DEFAULT 365')
 if (!userColumns.includes('mfa_secret')) db.exec('ALTER TABLE users ADD COLUMN mfa_secret TEXT')
 if (!userColumns.includes('mfa_enabled_at')) db.exec('ALTER TABLE users ADD COLUMN mfa_enabled_at TEXT')
 const messageColumns = db.prepare('PRAGMA table_info(messages)').all().map(column => column.name)
@@ -215,6 +216,12 @@ const runRetentionCleanup = () => {
     db.prepare('DELETE FROM password_reset_tokens WHERE expires_at < ? OR used_at < ?').run(now(), cutoff)
     db.prepare('DELETE FROM rate_limits WHERE window_started_at < ?').run(Date.now() - 120_000)
   })()
+}
+const runUserRetentionCleanup = userId => {
+  const user = db.prepare('SELECT retention_days FROM users WHERE id = ?').get(userId)
+  if (!user || user.retention_days === -1) return 0
+  const cutoff = new Date(Date.now() - user.retention_days * 24 * 60 * 60 * 1000).toISOString()
+  return db.prepare('DELETE FROM messages WHERE user_id = ? AND created_at < ?').run(userId, cutoff).changes
 }
 runRetentionCleanup()
 setInterval(runRetentionCleanup, 24 * 60 * 60 * 1000).unref()
@@ -472,14 +479,18 @@ app.post('/api/auth/password-reset/complete', (req, res) => {
 app.get('/api/auth/me', auth, (req, res) => res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)) }))
 
 app.get('/api/privacy/preferences', auth, (req, res) => {
-  const user = db.prepare('SELECT memory_enabled FROM users WHERE id = ?').get(req.user.id)
-  res.json({ memory_enabled: Boolean(user?.memory_enabled), retention_days: 365 })
+  const user = db.prepare('SELECT memory_enabled, retention_days FROM users WHERE id = ?').get(req.user.id)
+  res.json({ memory_enabled: Boolean(user?.memory_enabled), retention_days: user?.retention_days ?? 365 })
 })
 app.put('/api/privacy/preferences', auth, (req, res) => {
-  if (typeof req.body?.memory_enabled !== 'boolean') return res.status(400).json({ error: 'memory_enabled must be boolean.' })
-  db.prepare('UPDATE users SET memory_enabled = ? WHERE id = ?').run(req.body.memory_enabled ? 1 : 0, req.user.id)
-  audit(req, 'privacy.memory_preference', { enabled: req.body.memory_enabled })
-  res.json({ memory_enabled: req.body.memory_enabled })
+  const current = db.prepare('SELECT memory_enabled, retention_days FROM users WHERE id = ?').get(req.user.id)
+  const memoryEnabled = typeof req.body?.memory_enabled === 'boolean' ? req.body.memory_enabled : Boolean(current?.memory_enabled)
+  const retentionDays = req.body?.retention_days === undefined ? current?.retention_days ?? 365 : Number(req.body.retention_days)
+  if (![-1, 30, 90, 365].includes(retentionDays)) return res.status(400).json({ error: 'Choose 30, 90, or 365 days, or keep conversations until you delete them.' })
+  db.prepare('UPDATE users SET memory_enabled = ?, retention_days = ? WHERE id = ?').run(memoryEnabled ? 1 : 0, retentionDays, req.user.id)
+  const deletedMessages = runUserRetentionCleanup(req.user.id)
+  audit(req, 'privacy.preferences_updated', { memory_enabled: memoryEnabled, retention_days: retentionDays, deleted_messages: deletedMessages })
+  res.json({ memory_enabled: memoryEnabled, retention_days: retentionDays, deleted_messages: deletedMessages })
 })
 app.get('/api/privacy/export', auth, (req, res) => {
   const user = db.prepare('SELECT id, name, email, created_at FROM users WHERE id = ?').get(req.user.id)
