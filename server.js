@@ -306,18 +306,20 @@ async function extractMemoryProposal(content, existingStorylines = []) {
         { role: 'user', content: `<existing_storylines>\n${existingContext}\n</existing_storylines>\n<message>${content}</message>` }
       ] })
     })
-    if (!response.ok) return fallback
+    // A failed structured extraction must never be turned into a guessed memory.
+    // Memory is optional and requires an explicit, user-approved proposal.
+    if (!response.ok) return null
     const raw = (await response.json()).choices?.[0]?.message?.content
     const candidate = JSON.parse(raw || '{}')
-    if (!candidate.should_remember || typeof candidate.topic !== 'string' || typeof candidate.summary !== 'string') return fallback
+    if (!candidate.should_remember || typeof candidate.topic !== 'string' || typeof candidate.summary !== 'string') return null
     const topic = candidate.topic.trim().slice(0, 90)
     const summary = candidate.summary.trim().slice(0, 320)
     const confidence = Math.max(0.5, Math.min(0.95, Number(candidate.confidence) || 0.7))
     const sensitivity = candidate.sensitivity === 'sensitive' ? 'sensitive' : 'standard'
     const relatedStorylineId = existingStorylines.some(storyline => storyline.id === Number(candidate.related_storyline_id)) ? Number(candidate.related_storyline_id) : null
     const conflictStorylineId = existingStorylines.some(storyline => storyline.id === Number(candidate.conflict_storyline_id)) ? Number(candidate.conflict_storyline_id) : null
-    return topic && summary ? { topic, summary, source_quote: content, confidence, sensitivity, related_storyline_id: relatedStorylineId, conflict_storyline_id: conflictStorylineId } : fallback
-  } catch { return fallback }
+    return topic && summary ? { topic, summary, source_quote: content, confidence, sensitivity, related_storyline_id: relatedStorylineId, conflict_storyline_id: conflictStorylineId } : null
+  } catch { return null }
 }
 
 // A deterministic local extractor keeps the product fully demoable without an API key.
