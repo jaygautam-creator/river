@@ -14,6 +14,7 @@ const PORT = process.env.PORT || 8787
 const JWT_SECRET = process.env.JWT_SECRET || 'kindred-local-demo-secret'
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5'
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3-flash-preview'
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'
 const REALTIME_MODEL = process.env.REALTIME_MODEL || 'gpt-realtime'
 const allowedOrigin = process.env.APP_ORIGIN || `http://127.0.0.1:${PORT}`
 const RETENTION_DAYS = Math.max(30, Number(process.env.RETENTION_DAYS || 365))
@@ -291,6 +292,22 @@ function generateLocalReply(content, storylines, userName) {
 async function generateReply(content, storylines, userName) {
   const context = storylines.length ? `Known storylines:\n${storylines.map(s => `- ${s.topic}: ${s.summary}`).join('\n')}` : 'No storylines are known yet.'
   const systemPrompt = `You are River, a warm, grounded AI companion for ${userName}. Keep replies concise, human, and emotionally attentive. Use ongoing storylines when relevant, but never invent memories. Do not present yourself as a therapist. If the user may be in immediate danger, encourage emergency services and trusted human support.\n\n${context}`
+  if (process.env.GROQ_API_KEY) {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(45_000),
+      body: JSON.stringify({ model: GROQ_MODEL, messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content }
+      ], temperature: 0.7, max_completion_tokens: 280 })
+    })
+    if (!response.ok) throw new Error(`Groq request failed (${response.status}).`)
+    const data = await response.json()
+    const text = data.choices?.[0]?.message?.content?.trim()
+    if (!text) throw new Error('Groq returned an empty response.')
+    return text
+  }
   if (process.env.GEMINI_API_KEY) {
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`, {
       method: 'POST',
@@ -321,6 +338,7 @@ async function generateReply(content, storylines, userName) {
 }
 
 function configuredModelProvider() {
+  if (process.env.GROQ_API_KEY) return 'groq'
   if (process.env.GEMINI_API_KEY) return 'gemini'
   if (process.env.OPENAI_API_KEY) return 'openai'
   return 'local-fallback'
@@ -449,7 +467,7 @@ app.delete('/api/privacy/account', auth, (req, res) => {
   db.prepare('DELETE FROM users WHERE id = ?').run(req.user.id)
   res.json({ ok: true })
 })
-app.get('/api/health', (req, res) => res.json({ ok: true, service: 'river', provider: configuredModelProvider(), model: process.env.GEMINI_API_KEY ? GEMINI_MODEL : process.env.OPENAI_API_KEY ? OPENAI_MODEL : 'local-fallback' }))
+app.get('/api/health', (req, res) => res.json({ ok: true, service: 'river', provider: configuredModelProvider(), model: process.env.GROQ_API_KEY ? GROQ_MODEL : process.env.GEMINI_API_KEY ? GEMINI_MODEL : process.env.OPENAI_API_KEY ? OPENAI_MODEL : 'local-fallback' }))
 app.get('/api/readiness', (req, res) => {
   const checks = { database: Boolean(db.open), jwt_secret: process.env.NODE_ENV !== 'production' || Boolean(process.env.JWT_SECRET), model_fallback: true }
   const ready = Object.values(checks).every(Boolean)

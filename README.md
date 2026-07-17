@@ -16,9 +16,9 @@ Most conversational AI starts from zero. River is designed around continuity wit
 
 ## Hackathon quick start
 
-River works locally without a paid service. For real, model-generated conversation, add your Gemini API key to the ignored `.env` file; without it River uses the built-in local reply fallback.
+River works locally without a paid service. For real, model-generated conversation, add a Groq API key to the ignored `.env` file; without it River uses the built-in local reply fallback.
 
-The default is `gemini-3-flash-preview`, a model available to the configured Google AI Studio project at the time of setup. If Google reports quota or credit exhaustion, River deliberately keeps the conversation usable with its local fallback instead of claiming a model response.
+The default is Groq's `llama-3.3-70b-versatile`. Gemini remains available as a secondary provider. If a provider reports quota or credit exhaustion, River deliberately keeps the conversation usable with its local fallback instead of claiming a model response.
 
 ```bash
 npm install
@@ -54,7 +54,7 @@ Set `NODE_ENV=production`, unique `JWT_SECRET` and `FIELD_ENCRYPTION_KEY` values
 - Separate chat and memory scrolling surfaces.
 - Editable storyline memory cards.
 - Local SQLite persistence and demo seed flow.
-- Server-side Gemini `generateContent` integration for real companion responses, with a deterministic local fallback when no key is configured.
+- Server-side Groq chat integration for real companion responses, with Gemini and deterministic local fallbacks when no key is configured.
 - Persistent multi-conversation threads and search across conversations and approved memories.
 - User-controlled memory proposals, privacy preferences, and JSON data export.
 - Optional Realtime voice path with clear permission, failure, and reconnect states when an API key is configured.
