@@ -8,6 +8,7 @@
     "server": "node server.js",
     "build": "vite build",
     "test:smoke": "node scripts/smoke-test.mjs",
+    "test:memory-eval": "node scripts/memory-eval.mjs",
     "backup": "node scripts/backup.mjs",
     "start": "node server.js"
   },

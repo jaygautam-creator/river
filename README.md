@@ -85,6 +85,18 @@ Voice is hands-free after one start action: River detects a natural pause, trans
 
 Before the first spoken reply, open Groq's Orpheus English model in its playground and accept its one-time model terms. River shows a direct instruction if this has not been completed.
 
+## Memory evaluation
+
+River includes a small, reproducible memory-quality harness. It sends four durable-storyline cases and four cases that should not become memories, then reports proposal precision, recall, and F1. It measures approval-gated proposals rather than the wording of a chat reply.
+
+```bash
+npm run test:memory-eval
+# Optional quality gate: precision >= 0.80 and recall >= 0.60
+npm run test:memory-eval -- --strict
+```
+
+Run it against a locally started River server when you are ready to benchmark; results depend on the configured model and should be recorded with the model name and date.
+
 For a production launch, replace local SQLite with managed encrypted storage and complete independent security, privacy, and model-safety reviews.
 
 ## Project standards
