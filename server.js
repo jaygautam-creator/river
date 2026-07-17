@@ -7,11 +7,13 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import crypto from 'crypto'
 import * as OTPAuth from 'otpauth'
+import 'dotenv/config'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = process.env.PORT || 8787
 const JWT_SECRET = process.env.JWT_SECRET || 'kindred-local-demo-secret'
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5'
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3-flash-preview'
 const REALTIME_MODEL = process.env.REALTIME_MODEL || 'gpt-realtime'
 const allowedOrigin = process.env.APP_ORIGIN || `http://127.0.0.1:${PORT}`
 const RETENTION_DAYS = Math.max(30, Number(process.env.RETENTION_DAYS || 365))
@@ -287,13 +289,27 @@ function generateLocalReply(content, storylines, userName) {
 }
 
 async function generateReply(content, storylines, userName) {
-  if (!process.env.OPENAI_API_KEY) return generateLocalReply(content, storylines, userName)
   const context = storylines.length ? `Known storylines:\n${storylines.map(s => `- ${s.topic}: ${s.summary}`).join('\n')}` : 'No storylines are known yet.'
+  const systemPrompt = `You are River, a warm, grounded AI companion for ${userName}. Keep replies concise, human, and emotionally attentive. Use ongoing storylines when relevant, but never invent memories. Do not present yourself as a therapist. If the user may be in immediate danger, encourage emergency services and trusted human support.\n\n${context}`
+  if (process.env.GEMINI_API_KEY) {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`, {
+      method: 'POST',
+      headers: { 'x-goog-api-key': process.env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(45_000),
+      body: JSON.stringify({ systemInstruction: { parts: [{ text: systemPrompt }] }, contents: [{ role: 'user', parts: [{ text: content }] }], generationConfig: { temperature: 0.7, maxOutputTokens: 280 } })
+    })
+    if (!response.ok) throw new Error(`Gemini request failed (${response.status}).`)
+    const data = await response.json()
+    const text = data.candidates?.[0]?.content?.parts?.map(part => part.text || '').join('').trim()
+    if (!text) throw new Error('Gemini returned an empty response.')
+    return text
+  }
+  if (!process.env.OPENAI_API_KEY) return generateLocalReply(content, storylines, userName)
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
     headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: OPENAI_MODEL, input: [
-      { role: 'system', content: [{ type: 'input_text', text: `You are River, a warm, grounded AI companion for ${userName}. Keep replies concise, human, and emotionally attentive. Use ongoing storylines when relevant, but never invent memories. Do not present yourself as a therapist. If the user may be in immediate danger, encourage emergency services and trusted human support.\n\n${context}` }] },
+      { role: 'system', content: [{ type: 'input_text', text: systemPrompt }] },
       { role: 'user', content: [{ type: 'input_text', text: content }] }
     ], max_output_tokens: 220 })
   })
@@ -302,6 +318,12 @@ async function generateReply(content, storylines, userName) {
   const text = data.output?.flatMap(item => item.content || []).find(item => item.type === 'output_text')?.text?.trim()
   if (!text) throw new Error('Model returned an empty response.')
   return text
+}
+
+function configuredModelProvider() {
+  if (process.env.GEMINI_API_KEY) return 'gemini'
+  if (process.env.OPENAI_API_KEY) return 'openai'
+  return 'local-fallback'
 }
 
 app.post('/api/auth/signup', (req, res) => {
@@ -427,7 +449,7 @@ app.delete('/api/privacy/account', auth, (req, res) => {
   db.prepare('DELETE FROM users WHERE id = ?').run(req.user.id)
   res.json({ ok: true })
 })
-app.get('/api/health', (req, res) => res.json({ ok: true, service: 'river', model: Boolean(process.env.OPENAI_API_KEY) ? OPENAI_MODEL : 'local-fallback' }))
+app.get('/api/health', (req, res) => res.json({ ok: true, service: 'river', provider: configuredModelProvider(), model: process.env.GEMINI_API_KEY ? GEMINI_MODEL : process.env.OPENAI_API_KEY ? OPENAI_MODEL : 'local-fallback' }))
 app.get('/api/readiness', (req, res) => {
   const checks = { database: Boolean(db.open), jwt_secret: process.env.NODE_ENV !== 'production' || Boolean(process.env.JWT_SECRET), model_fallback: true }
   const ready = Object.values(checks).every(Boolean)
@@ -519,12 +541,14 @@ app.post('/api/chat', auth, async (req, res) => {
   }
   const context = relevantStorylines(req.user.id, content)
   let reply
+  let provider = configuredModelProvider()
   try { reply = await generateReply(content, context, req.user.name) } catch (error) {
     console.error(error.message)
+    provider = 'local-fallback'
     reply = generateLocalReply(content, context, req.user.name)
   }
   db.prepare("INSERT INTO messages (user_id, thread_id, role, content) VALUES (?, ?, 'assistant', ?)").run(req.user.id, thread.id, reply)
-  res.json({ reply, thread, storyline: null, proposal, proposals: getProposals(req.user.id), storylines: getStorylines(req.user.id), context })
+  res.json({ reply, provider, thread, storyline: null, proposal, proposals: getProposals(req.user.id), storylines: getStorylines(req.user.id), context })
 })
 
 app.post('/api/storylines/seed', auth, (req, res) => {

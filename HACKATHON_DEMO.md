@@ -9,7 +9,9 @@ npm install
 npm run dev
 ```
 
-Open `http://127.0.0.1:5173`. No paid API key is needed: River uses its local reply engine for the demo. Create a fresh account, then use **Seed a richer memory** if you want an immediate visual storyline demo.
+Open `http://127.0.0.1:5173`. For a real AI conversation, add your Gemini API key to the ignored `.env` file before starting River. Without a key, River remains fully usable with its local reply fallback. Create a fresh account, then use **Seed a richer memory** if you want an immediate visual storyline demo.
+
+If Google AI Studio reports that the project's Gemini credits or quota are depleted, top up/enable billing for that Google project or use another project key before recording the real-model portion of the demo. River will clearly and safely fall back locally until generation is available.
 
 ## 90-second video plan
 
