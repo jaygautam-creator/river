@@ -296,12 +296,25 @@ function extractStoryline(userId, content) {
   return parseStoryline(db.prepare('SELECT * FROM storylines WHERE id = ?').get(result.lastInsertRowid))
 }
 
+function isMemoryRecallRequest(content) {
+  return /(what (do you|can you) remember|what (did|have) we talk|what have i (told|said|shared)|prior conversation|previous conversation|last (time|recent talk|conversation)|recent (talk|conversation)|remind me|recall)/i.test(content)
+}
+
 function relevantStorylines(userId, content) {
   const all = getStorylines(userId)
-  if (/(what (do you|can you) remember|what (did|have) we talk|what have i (told|said|shared)|prior conversation|previous conversation|last time|remind me|recall)/i.test(content)) return all.filter(s => s.status !== 'resolved').slice(0, 5)
+  if (isMemoryRecallRequest(content)) return all.filter(s => s.status !== 'resolved').slice(0, 5)
   const words = new Set(content.toLowerCase().split(/\W+/).filter(w => w.length > 3))
   const scored = all.map(s => ({ s, score: [...words].filter(w => `${s.topic} ${s.summary}`.toLowerCase().includes(w)).length }))
   return scored.filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 3).map(x => x.s)
+}
+
+function memoryRecallReply(storylines) {
+  if (!storylines.length) return null
+  const [latest, ...earlier] = storylines
+  const lead = `I do remember the parts you asked me to keep. Most recently, ${latest.summary.charAt(0).toLowerCase()}${latest.summary.slice(1)}`
+  if (!earlier.length) return `${lead} Is that the conversation you mean?`
+  const otherTopics = earlier.slice(0, 2).map(storyline => storyline.topic.toLowerCase()).join(' and ')
+  return `${lead} I also have ${otherTopics} in mind. Is the most recent one what you wanted to return to?`
 }
 
 function generateLocalReply(content, storylines, userName) {
@@ -591,7 +604,8 @@ app.post('/api/chat', auth, async (req, res) => {
   const context = relevantStorylines(req.user.id, content)
   let reply
   let provider = configuredModelProvider()
-  try { reply = await generateReply(content, context, req.user.name) } catch (error) {
+  const directRecall = isMemoryRecallRequest(content) ? memoryRecallReply(context) : null
+  try { reply = directRecall || await generateReply(content, context, req.user.name) } catch (error) {
     console.error(error.message)
     provider = 'local-fallback'
     reply = generateLocalReply(content, context, req.user.name)
