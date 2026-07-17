@@ -298,6 +298,7 @@ function extractStoryline(userId, content) {
 
 function relevantStorylines(userId, content) {
   const all = getStorylines(userId)
+  if (/(what (do you|can you) remember|what (did|have) we talk|what have i (told|said|shared)|prior conversation|previous conversation|last time|remind me|recall)/i.test(content)) return all.filter(s => s.status !== 'resolved').slice(0, 5)
   const words = new Set(content.toLowerCase().split(/\W+/).filter(w => w.length > 3))
   const scored = all.map(s => ({ s, score: [...words].filter(w => `${s.topic} ${s.summary}`.toLowerCase().includes(w)).length }))
   return scored.filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 3).map(x => x.s)
