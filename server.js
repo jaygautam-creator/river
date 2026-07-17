@@ -518,6 +518,12 @@ app.get('/api/threads', auth, (req, res) => {
   ensureThread(req.user.id)
   res.json({ threads: db.prepare('SELECT id, title, created_at, updated_at FROM threads WHERE user_id = ? ORDER BY updated_at DESC').all(req.user.id) })
 })
+app.get('/api/reminders', auth, (req, res) => {
+  const cutoff = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).toISOString()
+  const reminders = db.prepare("SELECT id, topic, summary, follow_up_due, last_updated_at FROM storylines WHERE user_id = ? AND status = 'open' AND follow_up_due IS NOT NULL AND follow_up_due <= ? ORDER BY follow_up_due ASC LIMIT 12").all(req.user.id, cutoff)
+  audit(req, 'reminders.list', { result_count: reminders.length })
+  res.json({ reminders })
+})
 app.post('/api/threads', auth, (req, res) => {
   const title = String(req.body?.title || 'New thread').trim().slice(0, 80) || 'New thread'
   const result = db.prepare('INSERT INTO threads (user_id, title) VALUES (?, ?)').run(req.user.id, title)
