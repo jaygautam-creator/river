@@ -22,7 +22,7 @@ River uses Groq for the real-text demo. Voice mode uses Groq Whisper transcripti
 | 25–45s | Send: “I’m planning a two-week Lisbon trip this summer with a tiny notebook.” | “River notices a potentially meaningful detail, but it does not silently save it.” |
 | 45–60s | Open Memory, approve the proposed Lisbon storyline | “The person decides what becomes memory. Every memory is visible and editable.” |
 | 60–75s | Create a new thread, search for Lisbon, open the result | “The thread continues across conversations, while search makes it easy to return to a moment.” |
-| 75–95s | Open Voice, record a short thought, then hear River reply | “Voice is private by default: a short recording is transcribed, never stored by River, and River answers in the same ongoing thread.” |
+| 75–95s | Open Voice, start one hands-free conversation, then hear River reply | “Voice is private by default: River detects a natural pause, transcribes it, answers in the same ongoing thread, and listens again without making you restart each turn.” |
 | 95–120s | Open Account & privacy | “River includes export, deletion, memory consent, session controls, and optional authenticator MFA—privacy is part of the product, not an afterthought.” |
 
 ## Demo guardrails

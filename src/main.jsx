@@ -120,51 +120,70 @@ function EmptyState({ user, onSeed }) {
 
 function VoiceScreen({ onBack, onSend }) {
   const [state, setState] = useState('idle')
-  const [message, setMessage] = useState('Tap and hold a thought, then let River answer aloud.')
-  const streamRef = useRef(null)
-  const audioRef = useRef(null)
-  const recorderRef = useRef(null)
-  const audioUrlRef = useRef(null)
+  const [message, setMessage] = useState('Start once. River will listen, answer, and listen again until you end the conversation.')
+  const streamRef = useRef(null), audioRef = useRef(null), recorderRef = useRef(null), audioUrlRef = useRef(null)
+  const contextRef = useRef(null), analyserRef = useRef(null), monitorRef = useRef(null), conversationRef = useRef(false)
+  const stateRef = useRef('idle'), heardSpeechRef = useRef(false), lastSpeechRef = useRef(0)
+  const setVoiceState = value => { stateRef.current = value; setState(value) }
+  const clearMonitor = () => { if (monitorRef.current) window.clearInterval(monitorRef.current); monitorRef.current = null }
   const stop = () => {
-    recorderRef.current?.state === 'recording' && recorderRef.current.stop(); recorderRef.current = null
-    streamRef.current?.getTracks().forEach(track => track.stop()); streamRef.current = null
+    conversationRef.current = false; clearMonitor()
+    if (recorderRef.current?.state === 'recording') recorderRef.current.stop()
+    recorderRef.current = null; streamRef.current?.getTracks().forEach(track => track.stop()); streamRef.current = null
+    contextRef.current?.close().catch(() => {}); contextRef.current = null; analyserRef.current = null
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current.removeAttribute('src') }
     if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current); audioUrlRef.current = null
-    setState('idle'); setMessage('Voice session ended. Your audio is not stored by River.')
+    setVoiceState('idle'); setMessage('Voice conversation ended. River does not store your audio recording.')
   }
-  useEffect(() => () => { recorderRef.current?.state === 'recording' && recorderRef.current.stop(); streamRef.current?.getTracks().forEach(track => track.stop()); if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current) }, [])
+  useEffect(() => () => stop(), [])
+  const volume = () => {
+    if (!analyserRef.current) return 0
+    const values = new Uint8Array(analyserRef.current.fftSize); analyserRef.current.getByteTimeDomainData(values)
+    return values.reduce((sum, value) => sum + Math.abs(value - 128), 0) / values.length
+  }
+  const beginListening = () => {
+    if (!conversationRef.current || !streamRef.current || recorderRef.current?.state === 'recording') return
+    const chunks = []; const recorder = new MediaRecorder(streamRef.current); recorderRef.current = recorder
+    heardSpeechRef.current = false; lastSpeechRef.current = Date.now()
+    recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data) }
+    recorder.onstop = async () => {
+      if (!conversationRef.current || !heardSpeechRef.current) return
+      try {
+        setVoiceState('thinking'); setMessage('River is thinking…')
+        const { transcript } = await apiAudio('/api/voice/transcribe', new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }))
+        const reply = await onSend(transcript)
+        if (!reply) throw new Error('River could not create a reply.')
+        setVoiceState('speaking'); setMessage('River is speaking — begin talking at any time to interrupt.')
+        const csrf = document.cookie.split('; ').find(value => value.startsWith('river_csrf='))?.split('=')[1]
+        const speech = await fetch('/api/voice/speak', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...(csrf ? { 'X-CSRF-Token': csrf } : {}) }, body: JSON.stringify({ text: reply }) })
+        if (!speech.ok) { const data = await speech.json().catch(() => ({})); throw new Error(data.error || 'River could not create spoken audio.') }
+        if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current)
+        audioUrlRef.current = URL.createObjectURL(await speech.blob())
+        if (audioRef.current) { audioRef.current.src = audioUrlRef.current; audioRef.current.onended = () => beginListening(); await audioRef.current.play() }
+      } catch (error) { setVoiceState('error'); setMessage(error.message || 'Voice could not complete. Try again.') }
+    }
+    recorder.start(250); setVoiceState('listening'); setMessage('Listening… pause naturally when you are done.')
+  }
   const begin = async () => {
-    setState('connecting'); setMessage('Checking your microphone permission…')
+    setVoiceState('connecting'); setMessage('Checking your microphone permission…')
     try {
       const session = await api('/api/voice/session')
       if (!session.enabled || session.provider !== 'groq') throw new Error('Groq voice is not configured for this River environment yet.')
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
-      streamRef.current = stream
-      const chunks = []
-      const recorder = new MediaRecorder(stream)
-      recorderRef.current = recorder
-      recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data) }
-      recorder.onstop = async () => {
-        stream.getTracks().forEach(track => track.stop()); streamRef.current = null
-        try {
-          setState('thinking'); setMessage('Listening to your words…')
-          const recording = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' })
-          const { transcript } = await apiAudio('/api/voice/transcribe', recording)
-          setMessage(`You said: “${transcript}”`)
-          const reply = await onSend(transcript)
-          if (!reply) throw new Error('River could not create a reply.')
-          setMessage('River is speaking…')
-          const speech = await fetch('/api/voice/speak', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...(document.cookie.split('; ').find(value => value.startsWith('river_csrf=')) ? { 'X-CSRF-Token': document.cookie.split('; ').find(value => value.startsWith('river_csrf='))?.split('=')[1] } : {}) }, body: JSON.stringify({ text: reply }) })
-          if (!speech.ok) { const data = await speech.json().catch(() => ({})); throw new Error(data.error || 'River could not create spoken audio.') }
-          const url = URL.createObjectURL(await speech.blob()); audioUrlRef.current = url
-          if (audioRef.current) { audioRef.current.src = url; await audioRef.current.play() }
-          setState('ready'); setMessage('River answered. Tap again whenever you want to continue.')
-        } catch (err) { setState('error'); setMessage(err.message || 'Voice could not complete. Try again.') }
-      }
-      recorder.start(); setState('recording'); setMessage('Listening… tap Stop when you are finished.')
-    } catch (err) { setState('error'); setMessage(err.message || 'Voice setup could not start. Check your microphone and try again.') }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); streamRef.current = stream
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext; const context = new AudioContextClass(); contextRef.current = context
+      const analyser = context.createAnalyser(); analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0.75; analyserRef.current = analyser; context.createMediaStreamSource(stream).connect(analyser)
+      conversationRef.current = true
+      monitorRef.current = window.setInterval(() => {
+        if (!conversationRef.current) return
+        const speaking = volume() > 3.2
+        if (speaking) { heardSpeechRef.current = true; lastSpeechRef.current = Date.now() }
+        if (stateRef.current === 'speaking' && speaking) { audioRef.current?.pause(); audioRef.current?.removeAttribute('src'); beginListening(); return }
+        if (stateRef.current === 'listening' && heardSpeechRef.current && Date.now() - lastSpeechRef.current > 900) recorderRef.current?.stop()
+      }, 120)
+      beginListening()
+    } catch (error) { setVoiceState('error'); setMessage(error.message || 'Voice setup could not start. Check your microphone and try again.') }
   }
-  const recording = state === 'recording'
-  return <div className="voice-screen"><button className="back-link" onClick={() => { stop(); onBack() }}>← back to text</button><div className="voice-screen-inner"><audio ref={audioRef} /><div className={`voice-breathe ${recording ? 'recording' : ''}`}><div className="breathe-ring ring-a" /><div className="breathe-ring ring-b" /><div className="voice-center"><Mic size={30} /></div></div><div className="eyebrow centered"><span className="eyebrow-dot" /> private voice mode</div><h2>Say it out loud.</h2><p>Your recording is sent only for transcription and is not stored by River.</p><div className="voice-note"><Headphones size={16} /><span>{message}</span></div>{recording ? <button className="ghost-button voice-start" onClick={() => recorderRef.current?.stop()}><X size={14} /> Stop and send</button> : <button className="ghost-button voice-start" onClick={begin} disabled={state === 'connecting' || state === 'thinking'}>{state === 'connecting' || state === 'thinking' ? <Loader2 className="spin" size={14} /> : <Mic size={14} />} {state === 'error' ? 'Try again' : 'Start voice'}</button>}</div></div>
+  return <div className="voice-screen"><button className="back-link" onClick={() => { stop(); onBack() }}>← back to text</button><div className="voice-screen-inner"><audio ref={audioRef} /><div className={`voice-breathe ${state === 'listening' ? 'recording' : ''}`}><div className="breathe-ring ring-a" /><div className="breathe-ring ring-b" /><div className="voice-center"><Mic size={30} /></div></div><div className="eyebrow centered"><span className="eyebrow-dot" /> hands-free voice mode</div><h2>Talk naturally.</h2><p>River listens for a pause, answers, then listens again. Speak anytime to interrupt.</p><div className="voice-note"><Headphones size={16} /><span>{message}</span></div>{state === 'idle' || state === 'error' ? <button className="ghost-button voice-start" onClick={begin} disabled={state === 'connecting'}>{state === 'connecting' ? <Loader2 className="spin" size={14} /> : <Mic size={14} />} {state === 'error' ? 'Try again' : 'Start conversation'}</button> : <button className="ghost-button voice-start" onClick={stop}><X size={14} /> End conversation</button>}</div></div>
 }
 
 function SearchPanel({ onClose, onSelectThread }) {

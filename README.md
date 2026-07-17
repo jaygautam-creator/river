@@ -57,7 +57,7 @@ Set `NODE_ENV=production`, unique `JWT_SECRET` and `FIELD_ENCRYPTION_KEY` values
 - Server-side Groq chat integration for real companion responses, with Gemini and deterministic local fallbacks when no key is configured.
 - Persistent multi-conversation threads and search across conversations and approved memories.
 - User-controlled memory proposals, privacy preferences, and JSON data export.
-- Groq voice mode: microphone recording, Whisper transcription, the same River memory-aware reply, and Orpheus speech output. Recordings are not stored by River.
+- Hands-free Groq voice mode: start once, speak naturally, River detects a pause, replies aloud, and resumes listening. Speaking while River is talking interrupts the response. Recordings are not stored by River.
 - Health, readiness, and authenticated metrics endpoints plus CI build/audit checks.
 - Authenticator-app MFA, refresh-session device listing/revocation, and transactional password-reset delivery interfaces.
 
@@ -70,7 +70,7 @@ GROQ_TRANSCRIPTION_MODEL=whisper-large-v3-turbo
 GROQ_SPEECH_MODEL=canopylabs/orpheus-v1-english
 ```
 
-Voice is turn-based by design: start recording, stop to submit, then River transcribes, replies in the active conversation thread, and speaks the reply. River does not persist the audio recording.
+Voice is hands-free after one start action: River detects a natural pause, transcribes the turn, replies in the active conversation thread, speaks the reply, and resumes listening. Speaking while River is talking interrupts the response. River does not persist the audio recording.
 
 Before the first spoken reply, open Groq's Orpheus English model in its playground and accept its one-time model terms. River shows a direct instruction if this has not been completed.
 
