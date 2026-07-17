@@ -50,6 +50,15 @@ docker run --rm -p 8787:8787 -v river-data:/app/data -e DATABASE_PATH=/app/data/
 
 Set `NODE_ENV=production`, unique `JWT_SECRET` and `FIELD_ENCRYPTION_KEY` values, and production CORS settings before exposing River publicly. `FIELD_ENCRYPTION_KEY` encrypts authenticator-app MFA secrets at rest and must be independently rotated from the JWT secret. Browser sessions use secure HTTP-only cookies plus a CSRF token; terminate TLS before the container and preserve the forwarded HTTPS protocol. The included container is a deployment interface, not a substitute for managed database backups, TLS termination, key management, or an independent security review.
 
+### Optional transactional email
+
+River can deliver password-recovery and email-verification links through Resend when these ignored environment variables are configured. Without them, those local-development flows remain available through the server console only and must not be relied on in production.
+
+```bash
+RESEND_API_KEY=re_...
+EMAIL_FROM="River <hello@example.com>"
+```
+
 ## What is included
 
 - Responsive chat shell for mobile, tablet, and laptop layouts.
@@ -61,7 +70,7 @@ Set `NODE_ENV=production`, unique `JWT_SECRET` and `FIELD_ENCRYPTION_KEY` values
 - User-controlled memory proposals, privacy preferences, and JSON data export.
 - Hands-free Groq voice mode: start once, speak naturally, River detects a pause, replies aloud, and resumes listening. Speaking while River is talking interrupts the response. Recordings are not stored by River.
 - Health, readiness, and authenticated metrics endpoints plus CI build/audit checks.
-- Authenticator-app MFA, refresh-session device listing/revocation, and transactional password-reset delivery interfaces.
+- Email verification, authenticator-app MFA, refresh-session device listing/revocation, and transactional password-reset delivery interfaces.
 
 ## Groq voice setup
 

@@ -89,6 +89,15 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
   );
+  CREATE TABLE IF NOT EXISTS email_verification_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
   CREATE TABLE IF NOT EXISTS rate_limits (
     key TEXT PRIMARY KEY,
     window_started_at INTEGER NOT NULL,
@@ -113,6 +122,7 @@ if (!userColumns.includes('memory_enabled')) db.exec('ALTER TABLE users ADD COLU
 if (!userColumns.includes('retention_days')) db.exec('ALTER TABLE users ADD COLUMN retention_days INTEGER NOT NULL DEFAULT 365')
 if (!userColumns.includes('mfa_secret')) db.exec('ALTER TABLE users ADD COLUMN mfa_secret TEXT')
 if (!userColumns.includes('mfa_enabled_at')) db.exec('ALTER TABLE users ADD COLUMN mfa_enabled_at TEXT')
+if (!userColumns.includes('email_verified_at')) db.exec('ALTER TABLE users ADD COLUMN email_verified_at TEXT')
 const messageColumns = db.prepare('PRAGMA table_info(messages)').all().map(column => column.name)
 if (!messageColumns.includes('thread_id')) db.exec('ALTER TABLE messages ADD COLUMN thread_id INTEGER REFERENCES threads(id) ON DELETE CASCADE')
 const refreshColumns = db.prepare('PRAGMA table_info(refresh_tokens)').all().map(column => column.name)
@@ -169,7 +179,7 @@ app.use((req, res, next) => {
 const now = () => new Date().toISOString()
 const audit = (req, event, metadata = {}) => db.prepare('INSERT INTO audit_events (user_id, event, request_id, metadata) VALUES (?, ?, ?, ?)').run(req.user?.id || null, event, req.requestId, JSON.stringify(metadata))
 const tokenFor = (user) => jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, { expiresIn: '30d' })
-const publicUser = (user) => ({ id: user.id, name: user.name, email: user.email, mfa_enabled: Boolean(user.mfa_enabled_at) })
+const publicUser = (user) => ({ id: user.id, name: user.name, email: user.email, mfa_enabled: Boolean(user.mfa_enabled_at), email_verified: Boolean(user.email_verified_at) })
 const readCookie = (req, name) => String(req.headers.cookie || '').split(';').map(part => part.trim()).find(part => part.startsWith(`${name}=`))?.slice(name.length + 1)
 const cookieOptions = (httpOnly = true) => ({ httpOnly, secure: isProduction, sameSite: 'lax', path: '/', maxAge: 1000 * 60 * 60 * 24 * 30 })
 const setSessionCookies = (res, token, refreshToken) => {
@@ -182,7 +192,7 @@ const clearSessionCookies = res => ['river_access', 'river_refresh', 'river_csrf
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api') || ['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next()
   const cookieSession = readCookie(req, 'river_access') || readCookie(req, 'river_refresh')
-  const exempt = ['/api/auth/signup', '/api/auth/login', '/api/auth/password-reset/request', '/api/auth/password-reset/complete']
+  const exempt = ['/api/auth/signup', '/api/auth/login', '/api/auth/password-reset/request', '/api/auth/password-reset/complete', '/api/auth/email-verification/complete']
   if (!cookieSession || exempt.includes(req.path)) return next()
   const cookieToken = readCookie(req, 'river_csrf') || ''
   const headerToken = String(req.headers['x-csrf-token'] || '')
@@ -208,6 +218,15 @@ async function sendTransactionalEmail({ to, subject, text }) {
   if (!response.ok) throw new Error(`Email provider failed (${response.status}).`)
   return true
 }
+async function sendEmailVerification(user) {
+  if (user.email_verified_at) return false
+  const raw = crypto.randomBytes(32).toString('base64url')
+  db.prepare('INSERT INTO email_verification_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)').run(user.id, hashToken(raw), new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString())
+  const verificationUrl = `${allowedOrigin}/?verify_email_token=${encodeURIComponent(raw)}`
+  const delivered = await sendTransactionalEmail({ to: user.email, subject: 'Verify your River email', text: `Verify your River email within 24 hours: ${verificationUrl}` })
+  if (!delivered && process.env.NODE_ENV !== 'production') console.info(`Email verification token for user ${user.id}: ${raw}`)
+  return delivered
+}
 const issueRefreshToken = (userId, req) => {
   const token = crypto.randomBytes(48).toString('base64url')
   db.prepare('INSERT INTO refresh_tokens (user_id, token_hash, expires_at, user_agent, ip_address) VALUES (?, ?, ?, ?, ?)').run(userId, hashToken(token), new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString(), String(req?.headers['user-agent'] || '').slice(0, 240), String(req?.ip || '').slice(0, 64))
@@ -229,6 +248,7 @@ const runRetentionCleanup = () => {
     db.prepare('DELETE FROM audit_events WHERE created_at < ?').run(cutoff)
     db.prepare('DELETE FROM refresh_tokens WHERE expires_at < ? OR revoked_at < ?').run(now(), cutoff)
     db.prepare('DELETE FROM password_reset_tokens WHERE expires_at < ? OR used_at < ?').run(now(), cutoff)
+    db.prepare('DELETE FROM email_verification_tokens WHERE expires_at < ? OR used_at < ?').run(now(), cutoff)
     db.prepare('DELETE FROM rate_limits WHERE window_started_at < ?').run(Date.now() - 120_000)
   })()
 }
@@ -405,6 +425,7 @@ app.post('/api/auth/signup', (req, res) => {
     const result = db.prepare('INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)').run(name.trim(), email.toLowerCase().trim(), bcrypt.hashSync(password, 10))
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid)
     ensureThread(user.id)
+    sendEmailVerification(user).catch(error => console.error(`Email verification delivery failed: ${error.message}`))
     audit(req, 'auth.signup')
     respondSession(res, user, req)
   } catch { res.status(409).json({ error: 'An account with that email already exists.' }) }
@@ -493,6 +514,24 @@ app.post('/api/auth/password-reset/complete', (req, res) => {
     db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').run(now(), row.user_id)
   })()
   audit(req, 'auth.password_reset_completed')
+  res.json({ ok: true })
+})
+app.post('/api/auth/email-verification/request', auth, async (req, res) => {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)
+  if (!user || user.email_verified_at) return res.json({ message: 'Your email is already verified.' })
+  try { await sendEmailVerification(user) } catch (error) { console.error(`Email verification delivery failed: ${error.message}`) }
+  audit(req, 'auth.email_verification_requested')
+  res.json({ message: 'If email delivery is configured, verification instructions have been sent.' })
+})
+app.post('/api/auth/email-verification/complete', (req, res) => {
+  const token = String(req.body?.token || '')
+  const row = db.prepare('SELECT * FROM email_verification_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?').get(hashToken(token), now())
+  if (!row) return res.status(400).json({ error: 'Verification link is invalid or expired.' })
+  db.transaction(() => {
+    db.prepare('UPDATE users SET email_verified_at = ? WHERE id = ?').run(now(), row.user_id)
+    db.prepare('UPDATE email_verification_tokens SET used_at = ? WHERE id = ?').run(now(), row.id)
+  })()
+  audit(req, 'auth.email_verified')
   res.json({ ok: true })
 })
 app.get('/api/auth/me', auth, (req, res) => res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)) }))
