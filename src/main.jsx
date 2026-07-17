@@ -22,6 +22,18 @@ const apiAudio = async (path, blob) => {
   return data
 }
 
+const useEscapeDismiss = onDismiss => {
+  useEffect(() => {
+    const dismiss = event => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      event.preventDefault()
+      onDismiss()
+    }
+    document.addEventListener('keydown', dismiss)
+    return () => document.removeEventListener('keydown', dismiss)
+  }, [onDismiss])
+}
+
 function Auth({ onAuth }) {
   const [mode, setMode] = useState(() => new URLSearchParams(window.location.search).has('reset_token') ? 'reset' : 'signup')
   const [name, setName] = useState('')
@@ -99,6 +111,7 @@ function PrivacyPanel({ user, enabled, retentionDays, onToggle, onRetentionChang
   const [password, setPassword] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
+  useEscapeDismiss(onClose)
   const loadSessions = async () => { try { setSessions((await api('/api/auth/sessions')).sessions.filter(session => !session.revoked_at)) } catch {} }
   useEffect(() => { loadSessions() }, [])
   const setupMfa = async () => { setBusy(true); try { setMfaSetup(await api('/api/auth/mfa/setup', { method: 'POST', body: '{}' })); setNotice('Add this secret to an authenticator app, then enter the six-digit code.') } catch (err) { setNotice(err.message) } finally { setBusy(false) } }
@@ -133,6 +146,7 @@ function MemoryPanel({ storylines, proposals = [], onUpdate, onDelete, onApprove
   const [draft, setDraft] = useState({})
   const [historyFor, setHistoryFor] = useState(null)
   const [history, setHistory] = useState([])
+  useEscapeDismiss(onClose)
   const startEdit = story => { setEditing(story.id); setDraft({ topic: story.topic, summary: story.summary }) }
   const save = async id => { await onUpdate(id, draft); setEditing(null) }
   const showHistory = async id => { if (historyFor === id) { setHistoryFor(null); return } const data = await onHistory(id); setHistory(data.events); setHistoryFor(id) }
@@ -144,6 +158,7 @@ function EmptyState({ user, onSeed, onPrompt }) {
 }
 
 function TodayPanel({ reminders, storylines, onClose, onOpenMemory }) {
+  useEscapeDismiss(onClose)
   return <div className="privacy-overlay"><section className="privacy-card today-card" role="dialog" aria-modal="true" aria-label="Today in River"><div className="panel-head"><div><div className="eyebrow"><span className="eyebrow-dot" /> a gentle check-in</div><h2>Today</h2></div><button className="icon-button" aria-label="Close today" onClick={onClose}><X size={18} /></button></div><p className="panel-intro">A quiet view of the things you may want to return to. Nothing is sent outside River.</p><div className="today-stats"><div><strong>{storylines.filter(storyline => storyline.status === 'open').length}</strong><span>open storylines</span></div><div><strong>{reminders.length}</strong><span>gentle follow-ups</span></div></div><section className="today-reminders"><div className="eyebrow"><Bell size={12} /> follow-ups</div>{reminders.length ? reminders.map(reminder => <article className="reminder-card" key={reminder.id}><strong>{reminder.topic}</strong><p>{reminder.summary}</p><small>Due {new Date(reminder.follow_up_due).toLocaleDateString([], { month: 'short', day: 'numeric' })}</small></article>) : <div className="today-empty">No follow-ups are due. You can simply start wherever you are.</div>}</section><div className="privacy-actions"><button className="ghost-button" onClick={onOpenMemory}>Open memory</button><button className="save-button" onClick={onClose}>Done</button></div></section></div>
 }
 
@@ -236,6 +251,7 @@ function SearchPanel({ onClose, onSelectThread }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState({ messages: [], storylines: [] })
   const [busy, setBusy] = useState(false)
+  useEscapeDismiss(onClose)
   useEffect(() => {
     if (query.trim().length < 2) { setResults({ messages: [], storylines: [] }); return }
     const timeout = setTimeout(async () => {
@@ -248,6 +264,7 @@ function SearchPanel({ onClose, onSelectThread }) {
 }
 
 function MobileMenuPanel({ onClose, onNew, onToday, onMemory, onPrivacy, onLogout }) {
+  useEscapeDismiss(onClose)
   const choose = action => { action(); onClose() }
   return <div className="privacy-overlay mobile-nav-overlay"><section className="privacy-card mobile-nav-card" role="dialog" aria-modal="true" aria-label="River navigation"><div className="panel-head"><div className="mobile-brand"><div className="brand-mark small"><Sparkles size={14} /></div>River</div><button className="icon-button" aria-label="Close menu" onClick={onClose}><X size={18} /></button></div><nav className="mobile-nav-list"><button onClick={() => choose(onNew)}><Plus size={17} /> New thread</button><button onClick={() => choose(onToday)}><Compass size={17} /> Today</button><button onClick={() => choose(onMemory)}><BookOpen size={17} /> Memory</button><button onClick={() => choose(onPrivacy)}><Settings2 size={17} /> Account & privacy</button></nav><button className="mobile-logout" onClick={() => choose(onLogout)}><LogOut size={16} /> Sign out</button></section></div>
 }
