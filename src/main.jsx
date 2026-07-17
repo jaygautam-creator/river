@@ -146,11 +146,19 @@ function VoiceScreen({ onBack, onSend }) {
     const values = new Uint8Array(analyserRef.current.fftSize); analyserRef.current.getByteTimeDomainData(values)
     return values.reduce((sum, value) => sum + Math.abs(value - 128), 0) / values.length
   }
+  const playCurrentReply = async () => {
+    if (!audioRef.current?.src) throw new Error('River’s audio reply is no longer available. Please speak again.')
+    audioRef.current.onended = () => { if (conversationRef.current) beginListening() }
+    audioRef.current.onerror = () => { setVoiceState('awaiting-playback'); setMessage('River created a reply, but your browser could not play it. Check tab sound, then try again or continue by text.') }
+    await audioRef.current.play()
+    setVoiceState('speaking'); setMessage('River is speaking — begin talking at any time to interrupt.')
+  }
   const beginListening = () => {
     if (!conversationRef.current || !streamRef.current || recorderRef.current?.state === 'recording') return
     const chunks = []; const recorder = new MediaRecorder(streamRef.current); recorderRef.current = recorder
     heardSpeechRef.current = false; lastSpeechRef.current = Date.now(); speechOnsetRef.current = 0; turnStartedRef.current = Date.now()
     recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data) }
+    recorder.onerror = () => { setVoiceState('error'); setMessage('Your microphone recording stopped unexpectedly. Try reconnecting voice.') }
     recorder.onstop = async () => {
       if (!conversationRef.current || !heardSpeechRef.current) return
       try {
@@ -166,8 +174,7 @@ function VoiceScreen({ onBack, onSend }) {
         audioUrlRef.current = URL.createObjectURL(await speech.blob())
         if (audioRef.current) {
           audioRef.current.src = audioUrlRef.current
-          audioRef.current.onended = () => { if (conversationRef.current) beginListening() }
-          try { await audioRef.current.play() } catch { setVoiceState('awaiting-playback'); setMessage('Your browser paused River’s audio. Tap “Play River’s reply” to hear it and continue.') }
+          try { await playCurrentReply() } catch { setVoiceState('awaiting-playback'); setMessage('Your browser paused River’s audio. Tap “Play River’s reply” to hear it and continue.') }
         }
       } catch (error) { setVoiceState('error'); setMessage(error.message || 'Voice could not complete. Try again.') }
     }
@@ -180,6 +187,7 @@ function VoiceScreen({ onBack, onSend }) {
       if (!session.enabled || session.provider !== 'groq') throw new Error('Groq voice is not configured for this River environment yet.')
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); streamRef.current = stream
       const AudioContextClass = window.AudioContext || window.webkitAudioContext; const context = new AudioContextClass(); contextRef.current = context
+      if (context.state === 'suspended') await context.resume()
       const analyser = context.createAnalyser(); analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0.75; analyserRef.current = analyser; context.createMediaStreamSource(stream).connect(analyser)
       conversationRef.current = true
       monitorRef.current = window.setInterval(() => {
@@ -196,7 +204,7 @@ function VoiceScreen({ onBack, onSend }) {
       beginListening()
     } catch (error) { setVoiceState('error'); setMessage(error.message || 'Voice setup could not start. Check your microphone and try again.') }
   }
-  const replay = async () => { try { await audioRef.current?.play(); setVoiceState('speaking'); setMessage('River is speaking — begin talking at any time to interrupt.') } catch { setMessage('Audio is still blocked. Check this tab’s sound/autoplay permission, then try again.') } }
+  const replay = async () => { try { await playCurrentReply() } catch { setMessage('Audio is still blocked. Check this tab’s sound/autoplay permission, then try again.') } }
   return <div className="voice-screen"><button className="back-link" onClick={() => { stop(); onBack() }}>← back to text</button><div className="voice-screen-inner"><audio ref={audioRef} /><div className={`voice-breathe ${state === 'listening' ? 'recording' : ''}`}><div className="breathe-ring ring-a" /><div className="breathe-ring ring-b" /><div className="voice-center"><Mic size={30} /></div></div><div className="eyebrow centered"><span className="eyebrow-dot" /> hands-free voice mode</div><h2>Talk naturally.</h2><p>River waits for a real pause, answers, then listens again. Speak clearly to interrupt.</p><div className="voice-note"><Headphones size={16} /><span>{message}</span></div>{state === 'idle' || state === 'error' ? <button className="ghost-button voice-start" onClick={begin} disabled={state === 'connecting'}>{state === 'connecting' ? <Loader2 className="spin" size={14} /> : <Mic size={14} />} {state === 'error' ? 'Try again' : 'Start conversation'}</button> : <div className="voice-actions">{state === 'awaiting-playback' && <button className="save-button voice-start" onClick={replay}><Headphones size={14} /> Play River’s reply</button>}<button className="ghost-button voice-start" onClick={stop}><X size={14} /> End conversation</button></div>}</div></div>
 }
 
