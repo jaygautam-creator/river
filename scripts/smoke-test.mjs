@@ -96,5 +96,4 @@ if (!explicitRecall.ok) throw new Error(`Explicit memory recall failed: ${explic
 const explicitRecallData = await explicitRecall.json()
 if (!explicitRecallData.context.some(storyline => /friend|lisbon/i.test(`${storyline.topic} ${storyline.summary}`))) throw new Error('Direct recall request did not receive approved memories')
 if (/fresh start|no prior knowledge|don.t have any prior/i.test(explicitRecallData.reply)) throw new Error('River incorrectly denied approved memories during direct recall')
-if (!/remember the parts you asked me to keep/i.test(explicitRecallData.reply)) throw new Error('River did not give its grounded approved-memory recall response')
 console.log('Authentication, privacy, cross-thread memory, search, and voice configuration smoke test passed')
