@@ -5,20 +5,20 @@ River handles private conversations and inferred personal storylines. Treat all 
 ## Current safeguards
 
 - Model credentials remain server-side and are never sent to the browser.
-- API requests have a body-size limit and basic per-IP throttling.
+- API requests have a body-size limit, request tracing, and basic persistent local throttling.
 - Production refuses to start without an explicit `JWT_SECRET`.
 - CORS defaults to the local origin and can be narrowed with `APP_ORIGIN`.
-- Storyline seed creation is idempotent.
+- Secure HTTP-only sessions use CSRF protection, refresh rotation, device revocation, session-version invalidation after MFA/password resets, authenticator-app MFA, email verification, and recovery flows.
+- Memory writes are consent-gated proposals with provenance, confidence, sensitivity, review, edit, and deletion controls.
+- Docker builds exclude local databases and backups; production backups require encryption and restrictive filesystem permissions.
 
 ## Required before production
 
 - Replace SQLite-local persistence with encrypted managed storage and tested backups.
 - Replace in-memory throttling with a shared Redis-backed limiter.
-- Use short-lived access tokens with refresh-token rotation and revocation.
-- Add account lockout, email verification, password reset, MFA, and audit events.
-- Add data export/deletion, retention controls, and explicit memory consent/revocation.
+- Add account lockout, suspicious-login detection, passkeys, and stronger device-risk signals.
 - Review model-provider data retention and regional processing requirements.
-- Add HTTPS, secure headers, CSRF protection where cookie auth is used, and dependency scanning.
+- Enforce TLS at the edge, add a complete secure-header policy, and run dependency/container scanning continuously.
 - Add centralized logs, metrics, traces, alerting, incident response, and key rotation.
 
 Do not treat the current local server as production deployable until these controls are implemented and independently reviewed.

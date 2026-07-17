@@ -35,6 +35,7 @@ For the Build Week submission checklist and personal-description outline, see [H
 
 ```bash
 npm run test:smoke
+npm run test:memory-eval
 npm run build
 npm audit --audit-level=high
 ```
@@ -49,6 +50,8 @@ docker run --rm -p 8787:8787 -v river-data:/app/data -e DATABASE_PATH=/app/data/
 ```
 
 Set `NODE_ENV=production`, unique `JWT_SECRET` and `FIELD_ENCRYPTION_KEY` values, and production CORS settings before exposing River publicly. `FIELD_ENCRYPTION_KEY` encrypts authenticator-app MFA secrets at rest and must be independently rotated from the JWT secret. Browser sessions use secure HTTP-only cookies plus a CSRF token; terminate TLS before the container and preserve the forwarded HTTPS protocol. The included container is a deployment interface, not a substitute for managed database backups, TLS termination, key management, or an independent security review.
+
+The production container runs as a non-root `river` user, persists the local database in `/app/data`, and has a health check. Its encrypted backup workflow requires `RIVER_BACKUP_ENCRYPTION_KEY` in production. To restore, stop River first, then explicitly set `RIVER_RESTORE_SOURCE`, `RIVER_BACKUP_ENCRYPTION_KEY`, and `RIVER_RESTORE_OVERWRITE=true` before running `npm run restore`.
 
 ### Optional transactional email
 
