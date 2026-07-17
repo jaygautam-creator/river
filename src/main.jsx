@@ -123,7 +123,7 @@ function VoiceScreen({ onBack, onSend }) {
   const [message, setMessage] = useState('Start once. River will listen, answer, and listen again until you end the conversation.')
   const streamRef = useRef(null), audioRef = useRef(null), recorderRef = useRef(null), audioUrlRef = useRef(null)
   const contextRef = useRef(null), analyserRef = useRef(null), monitorRef = useRef(null), conversationRef = useRef(false)
-  const stateRef = useRef('idle'), heardSpeechRef = useRef(false), lastSpeechRef = useRef(0)
+  const stateRef = useRef('idle'), heardSpeechRef = useRef(false), lastSpeechRef = useRef(0), speechOnsetRef = useRef(0), turnStartedRef = useRef(0)
   const setVoiceState = value => { stateRef.current = value; setState(value) }
   const clearMonitor = () => { if (monitorRef.current) window.clearInterval(monitorRef.current); monitorRef.current = null }
   const stop = () => {
@@ -144,7 +144,7 @@ function VoiceScreen({ onBack, onSend }) {
   const beginListening = () => {
     if (!conversationRef.current || !streamRef.current || recorderRef.current?.state === 'recording') return
     const chunks = []; const recorder = new MediaRecorder(streamRef.current); recorderRef.current = recorder
-    heardSpeechRef.current = false; lastSpeechRef.current = Date.now()
+    heardSpeechRef.current = false; lastSpeechRef.current = Date.now(); speechOnsetRef.current = 0; turnStartedRef.current = Date.now()
     recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data) }
     recorder.onstop = async () => {
       if (!conversationRef.current || !heardSpeechRef.current) return
@@ -159,7 +159,11 @@ function VoiceScreen({ onBack, onSend }) {
         if (!speech.ok) { const data = await speech.json().catch(() => ({})); throw new Error(data.error || 'River could not create spoken audio.') }
         if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current)
         audioUrlRef.current = URL.createObjectURL(await speech.blob())
-        if (audioRef.current) { audioRef.current.src = audioUrlRef.current; audioRef.current.onended = () => beginListening(); await audioRef.current.play() }
+        if (audioRef.current) {
+          audioRef.current.src = audioUrlRef.current
+          audioRef.current.onended = () => { if (conversationRef.current) beginListening() }
+          try { await audioRef.current.play() } catch { setVoiceState('awaiting-playback'); setMessage('Your browser paused River’s audio. Tap “Play River’s reply” to hear it and continue.') }
+        }
       } catch (error) { setVoiceState('error'); setMessage(error.message || 'Voice could not complete. Try again.') }
     }
     recorder.start(250); setVoiceState('listening'); setMessage('Listening… pause naturally when you are done.')
@@ -175,15 +179,20 @@ function VoiceScreen({ onBack, onSend }) {
       conversationRef.current = true
       monitorRef.current = window.setInterval(() => {
         if (!conversationRef.current) return
-        const speaking = volume() > 3.2
-        if (speaking) { heardSpeechRef.current = true; lastSpeechRef.current = Date.now() }
-        if (stateRef.current === 'speaking' && speaking) { audioRef.current?.pause(); audioRef.current?.removeAttribute('src'); beginListening(); return }
-        if (stateRef.current === 'listening' && heardSpeechRef.current && Date.now() - lastSpeechRef.current > 900) recorderRef.current?.stop()
+        const currentVolume = volume(); const now = Date.now(); const voiceDetected = currentVolume > 5.5
+        if (voiceDetected) {
+          if (!speechOnsetRef.current) speechOnsetRef.current = now
+          if (now - speechOnsetRef.current >= 280) { heardSpeechRef.current = true; lastSpeechRef.current = now }
+        } else speechOnsetRef.current = 0
+        const strongInterruption = currentVolume > 8 && speechOnsetRef.current && now - speechOnsetRef.current >= 450
+        if (stateRef.current === 'speaking' && strongInterruption) { audioRef.current?.pause(); audioRef.current?.removeAttribute('src'); beginListening(); return }
+        if (stateRef.current === 'listening' && heardSpeechRef.current && now - turnStartedRef.current >= 900 && now - lastSpeechRef.current > 1450) recorderRef.current?.stop()
       }, 120)
       beginListening()
     } catch (error) { setVoiceState('error'); setMessage(error.message || 'Voice setup could not start. Check your microphone and try again.') }
   }
-  return <div className="voice-screen"><button className="back-link" onClick={() => { stop(); onBack() }}>← back to text</button><div className="voice-screen-inner"><audio ref={audioRef} /><div className={`voice-breathe ${state === 'listening' ? 'recording' : ''}`}><div className="breathe-ring ring-a" /><div className="breathe-ring ring-b" /><div className="voice-center"><Mic size={30} /></div></div><div className="eyebrow centered"><span className="eyebrow-dot" /> hands-free voice mode</div><h2>Talk naturally.</h2><p>River listens for a pause, answers, then listens again. Speak anytime to interrupt.</p><div className="voice-note"><Headphones size={16} /><span>{message}</span></div>{state === 'idle' || state === 'error' ? <button className="ghost-button voice-start" onClick={begin} disabled={state === 'connecting'}>{state === 'connecting' ? <Loader2 className="spin" size={14} /> : <Mic size={14} />} {state === 'error' ? 'Try again' : 'Start conversation'}</button> : <button className="ghost-button voice-start" onClick={stop}><X size={14} /> End conversation</button>}</div></div>
+  const replay = async () => { try { await audioRef.current?.play(); setVoiceState('speaking'); setMessage('River is speaking — begin talking at any time to interrupt.') } catch { setMessage('Audio is still blocked. Check this tab’s sound/autoplay permission, then try again.') } }
+  return <div className="voice-screen"><button className="back-link" onClick={() => { stop(); onBack() }}>← back to text</button><div className="voice-screen-inner"><audio ref={audioRef} /><div className={`voice-breathe ${state === 'listening' ? 'recording' : ''}`}><div className="breathe-ring ring-a" /><div className="breathe-ring ring-b" /><div className="voice-center"><Mic size={30} /></div></div><div className="eyebrow centered"><span className="eyebrow-dot" /> hands-free voice mode</div><h2>Talk naturally.</h2><p>River waits for a real pause, answers, then listens again. Speak clearly to interrupt.</p><div className="voice-note"><Headphones size={16} /><span>{message}</span></div>{state === 'idle' || state === 'error' ? <button className="ghost-button voice-start" onClick={begin} disabled={state === 'connecting'}>{state === 'connecting' ? <Loader2 className="spin" size={14} /> : <Mic size={14} />} {state === 'error' ? 'Try again' : 'Start conversation'}</button> : <div className="voice-actions">{state === 'awaiting-playback' && <button className="save-button voice-start" onClick={replay}><Headphones size={14} /> Play River’s reply</button>}<button className="ghost-button voice-start" onClick={stop}><X size={14} /> End conversation</button></div>}</div></div>
 }
 
 function SearchPanel({ onClose, onSelectThread }) {
