@@ -13,6 +13,15 @@ const api = async (path, options = {}) => {
   return data
 }
 
+const apiAudio = async (path, blob) => {
+  const csrf = document.cookie.split('; ').find(value => value.startsWith('river_csrf='))?.split('=')[1]
+  const token = localStorage.getItem('kindred_token')
+  const response = await fetch(path, { method: 'POST', credentials: 'include', body: blob, headers: { 'Content-Type': blob.type || 'audio/webm', ...(csrf ? { 'X-CSRF-Token': csrf } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) } })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(data.error || 'Voice request failed.')
+  return data
+}
+
 function Auth({ onAuth }) {
   const [mode, setMode] = useState('signup')
   const [name, setName] = useState('')
@@ -109,36 +118,53 @@ function EmptyState({ user, onSeed }) {
   return <div className="empty-state"><div className="hello-orbit"><div className="orbit orbit-one" /><div className="orbit orbit-two" /><div className="hello-mark"><Sparkles size={24} /></div></div><div className="eyebrow centered"><span className="eyebrow-dot" /> your space, your pace</div><h1>What’s here today,<br /><em>{user.name.split(' ')[0]}?</em></h1><p>Start anywhere. I’ll keep hold of the things that matter<br className="desktop-only" /> and bring them back when the moment is right.</p><div className="prompt-grid"><button onClick={() => document.querySelector('textarea')?.focus()}><span>Unpack something</span><small>that’s been circling</small><ArrowUp size={15} /></button><button onClick={onSeed}><span>Show me what you remember</span><small>see the memory system in action</small><ArrowUp size={15} /></button></div></div>
 }
 
-function VoiceScreen({ onBack }) {
+function VoiceScreen({ onBack, onSend }) {
   const [state, setState] = useState('idle')
-  const [message, setMessage] = useState('Check your microphone permission before beginning.')
-  const connectionRef = useRef(null)
+  const [message, setMessage] = useState('Tap and hold a thought, then let River answer aloud.')
   const streamRef = useRef(null)
   const audioRef = useRef(null)
+  const recorderRef = useRef(null)
+  const audioUrlRef = useRef(null)
   const stop = () => {
-    connectionRef.current?.close(); connectionRef.current = null
+    recorderRef.current?.state === 'recording' && recorderRef.current.stop(); recorderRef.current = null
     streamRef.current?.getTracks().forEach(track => track.stop()); streamRef.current = null
+    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current); audioUrlRef.current = null
     setState('idle'); setMessage('Voice session ended. Your audio is not stored by River.')
   }
-  useEffect(() => () => { connectionRef.current?.close(); streamRef.current?.getTracks().forEach(track => track.stop()) }, [])
+  useEffect(() => () => { recorderRef.current?.state === 'recording' && recorderRef.current.stop(); streamRef.current?.getTracks().forEach(track => track.stop()); if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current) }, [])
   const begin = async () => {
-    setState('connecting'); setMessage('Preparing a private voice session…')
+    setState('connecting'); setMessage('Checking your microphone permission…')
     try {
       const session = await api('/api/voice/session')
-      if (!session.enabled) throw new Error('Voice is not configured for this River environment yet.')
+      if (!session.enabled || session.provider !== 'groq') throw new Error('Groq voice is not configured for this River environment yet.')
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
       streamRef.current = stream
-      const peer = new RTCPeerConnection(); connectionRef.current = peer
-      peer.ontrack = event => { if (audioRef.current) { audioRef.current.srcObject = event.streams[0]; audioRef.current.play().catch(() => {}) } }
-      peer.onconnectionstatechange = () => { if (peer.connectionState === 'failed' || peer.connectionState === 'disconnected') { setState('error'); setMessage('Voice disconnected. You can safely try again.'); stream.getTracks().forEach(track => track.stop()) } }
-      stream.getTracks().forEach(track => peer.addTrack(track, stream))
-      const offer = await peer.createOffer(); await peer.setLocalDescription(offer)
-      const call = await api('/api/voice/call', { method: 'POST', body: JSON.stringify({ sdp: offer.sdp }) })
-      await peer.setRemoteDescription({ type: 'answer', sdp: call.sdp })
-      setState('ready'); setMessage('Connected. Speak naturally; River can be interrupted at any time.')
+      const chunks = []
+      const recorder = new MediaRecorder(stream)
+      recorderRef.current = recorder
+      recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data) }
+      recorder.onstop = async () => {
+        stream.getTracks().forEach(track => track.stop()); streamRef.current = null
+        try {
+          setState('thinking'); setMessage('Listening to your words…')
+          const recording = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' })
+          const { transcript } = await apiAudio('/api/voice/transcribe', recording)
+          setMessage(`You said: “${transcript}”`)
+          const reply = await onSend(transcript)
+          if (!reply) throw new Error('River could not create a reply.')
+          setMessage('River is speaking…')
+          const speech = await fetch('/api/voice/speak', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...(document.cookie.split('; ').find(value => value.startsWith('river_csrf=')) ? { 'X-CSRF-Token': document.cookie.split('; ').find(value => value.startsWith('river_csrf='))?.split('=')[1] } : {}) }, body: JSON.stringify({ text: reply }) })
+          if (!speech.ok) { const data = await speech.json().catch(() => ({})); throw new Error(data.error || 'River could not create spoken audio.') }
+          const url = URL.createObjectURL(await speech.blob()); audioUrlRef.current = url
+          if (audioRef.current) { audioRef.current.src = url; await audioRef.current.play() }
+          setState('ready'); setMessage('River answered. Tap again whenever you want to continue.')
+        } catch (err) { setState('error'); setMessage(err.message || 'Voice could not complete. Try again.') }
+      }
+      recorder.start(); setState('recording'); setMessage('Listening… tap Stop when you are finished.')
     } catch (err) { setState('error'); setMessage(err.message || 'Voice setup could not start. Check your microphone and try again.') }
   }
-  return <div className="voice-screen"><button className="back-link" onClick={() => { stop(); onBack() }}>← back to text</button><div className="voice-screen-inner"><audio ref={audioRef} autoPlay /><div className="voice-breathe"><div className="breathe-ring ring-a" /><div className="breathe-ring ring-b" /><div className="voice-center"><Mic size={30} /></div></div><div className="eyebrow centered"><span className="eyebrow-dot" /> voice mode</div><h2>Say it out loud.</h2><p>The same River thread, without the typing.</p><div className="voice-note"><Headphones size={16} /><span>{message}</span></div>{state === 'ready' ? <button className="ghost-button voice-start" onClick={stop}><X size={14} /> End voice</button> : <button className="ghost-button voice-start" onClick={begin} disabled={state === 'connecting'}>{state === 'connecting' ? <Loader2 className="spin" size={14} /> : <Mic size={14} />} {state === 'error' ? 'Try again' : 'Start voice'}</button>}</div></div>
+  const recording = state === 'recording'
+  return <div className="voice-screen"><button className="back-link" onClick={() => { stop(); onBack() }}>← back to text</button><div className="voice-screen-inner"><audio ref={audioRef} /><div className={`voice-breathe ${recording ? 'recording' : ''}`}><div className="breathe-ring ring-a" /><div className="breathe-ring ring-b" /><div className="voice-center"><Mic size={30} /></div></div><div className="eyebrow centered"><span className="eyebrow-dot" /> private voice mode</div><h2>Say it out loud.</h2><p>Your recording is sent only for transcription and is not stored by River.</p><div className="voice-note"><Headphones size={16} /><span>{message}</span></div>{recording ? <button className="ghost-button voice-start" onClick={() => recorderRef.current?.stop()}><X size={14} /> Stop and send</button> : <button className="ghost-button voice-start" onClick={begin} disabled={state === 'connecting' || state === 'thinking'}>{state === 'connecting' || state === 'thinking' ? <Loader2 className="spin" size={14} /> : <Mic size={14} />} {state === 'error' ? 'Try again' : 'Start voice'}</button>}</div></div>
 }
 
 function SearchPanel({ onClose, onSelectThread }) {
@@ -190,7 +216,7 @@ function App({ user, onLogout }) {
     const nearBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 180
     if (nearBottom || messages.length <= 2) chat.scrollTo({ top: chat.scrollHeight, behavior: 'smooth' })
   }, [messages, busy])
-  const send = async content => { if (!activeThreadId) return; const temp = { id: `temp-${Date.now()}`, role: 'user', content, created_at: new Date().toISOString() }; setMessages(m => [...m, temp]); setBusy(true); setError(''); try { const data = await api('/api/chat', { method: 'POST', body: JSON.stringify({ content, thread_id: activeThreadId }) }); setMessages(m => [...m.filter(x => x.id !== temp.id), temp, { id: `reply-${Date.now()}`, role: 'assistant', content: data.reply, created_at: new Date().toISOString() }]); setStorylines(data.storylines); setProposals(data.proposals || []); await refreshThreads() } catch (err) { setMessages(m => m.filter(x => x.id !== temp.id)); setError(err.message) } finally { setBusy(false) } }
+  const send = async content => { if (!activeThreadId) return null; const temp = { id: `temp-${Date.now()}`, role: 'user', content, created_at: new Date().toISOString() }; setMessages(m => [...m, temp]); setBusy(true); setError(''); try { const data = await api('/api/chat', { method: 'POST', body: JSON.stringify({ content, thread_id: activeThreadId }) }); setMessages(m => [...m.filter(x => x.id !== temp.id), temp, { id: `reply-${Date.now()}`, role: 'assistant', content: data.reply, created_at: new Date().toISOString() }]); setStorylines(data.storylines); setProposals(data.proposals || []); await refreshThreads(); return data.reply } catch (err) { setMessages(m => m.filter(x => x.id !== temp.id)); setError(err.message); return null } finally { setBusy(false) } }
   const seed = async () => { setSeeding(true); try { const data = await api('/api/storylines/seed', { method: 'POST' }); setStorylines(data.storylines); setMemoryOpen(true) } finally { setSeeding(false) } }
   const update = async (id, draft) => { const data = await api(`/api/storylines/${id}`, { method: 'PUT', body: JSON.stringify(draft) }); setStorylines(s => s.map(x => x.id === id ? data.storyline : x)) }
   const remove = async id => { await api(`/api/storylines/${id}`, { method: 'DELETE' }); setStorylines(s => s.filter(x => x.id !== id)) }
@@ -200,7 +226,7 @@ function App({ user, onLogout }) {
   const exportData = async () => { try { const data = await api('/api/privacy/export'); const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })); const link = document.createElement('a'); link.href = url; link.download = `river-export-${new Date().toISOString().slice(0, 10)}.json`; link.click(); URL.revokeObjectURL(url) } catch (err) { setError(err.message) } }
   const newThread = async () => { try { const data = await api('/api/threads', { method: 'POST', body: JSON.stringify({ title: 'New thread' }) }); setThreads(current => [data.thread, ...current]); setActiveThreadId(data.thread.id); setMessages([]); setProposals([]); setMode('text'); setMemoryOpen(false); setError(''); requestAnimationFrame(() => document.querySelector('.composer textarea')?.focus()) } catch (err) { setError(err.message) } }
   const hasMessages = messages.length > 0
-  return <><div className="app-shell"><Sidebar user={user} threads={threads} activeThreadId={activeThreadId} onSelectThread={loadThread} onLogout={onLogout} onNew={newThread} onSeed={seed} seeding={seeding} onPrivacy={() => setPrivacyOpen(true)} /><main className="main-column"><header className="topbar"><div className="mobile-brand"><div className="brand-mark small"><Sparkles size={14} /></div>River</div><div className="session-label"><span className="live-dot" /> ongoing thread <ChevronDown size={14} /></div><div className="top-actions"><button className="icon-button" aria-label="Search" onClick={() => setSearchOpen(true)}><Search size={17} /></button><button className={`memory-toggle ${memoryOpen ? 'active' : ''}`} onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen}><BookOpen size={15} /> <span>Memory</span><span className="memory-number">{storylines.length + proposals.length}</span></button><button className="icon-button mobile-menu" aria-label="Open menu"><Menu size={18} /></button></div></header>{mode === 'voice' ? <VoiceScreen onBack={() => setMode('text')} /> : <><section ref={chatRef} className={`chat-area ${hasMessages ? 'has-messages' : ''}`}>{hasMessages ? <div className="message-list">{messages.map(m => <Message key={m.id} message={m} />)}{busy && <div className="thinking"><span className="mini-spark"><Sparkles size={11} /></span><span className="thinking-label">River is thinking</span><i /><i /><i /></div>}</div> : <EmptyState user={user} onSeed={seed} />}</section>{error && <div className="connection-notice" role="status">{error}</div>}<Composer onSend={send} busy={busy} mode={mode} setMode={setMode} /></>}</main>{memoryOpen && <><button className="memory-backdrop" aria-label="Dismiss memory overlay" onClick={() => setMemoryOpen(false)} /><MemoryPanel storylines={storylines} proposals={proposals} onUpdate={update} onDelete={remove} onApprove={approveProposal} onReject={rejectProposal} onClose={() => setMemoryOpen(false)} /></>}</div>{privacyOpen && <PrivacyPanel user={user} enabled={memoryEnabled} onToggle={toggleMemory} onExport={exportData} onClose={() => setPrivacyOpen(false)} onAccountDeleted={onLogout} />}{searchOpen && <SearchPanel onClose={() => setSearchOpen(false)} onSelectThread={loadThread} />}</>
+  return <><div className="app-shell"><Sidebar user={user} threads={threads} activeThreadId={activeThreadId} onSelectThread={loadThread} onLogout={onLogout} onNew={newThread} onSeed={seed} seeding={seeding} onPrivacy={() => setPrivacyOpen(true)} /><main className="main-column"><header className="topbar"><div className="mobile-brand"><div className="brand-mark small"><Sparkles size={14} /></div>River</div><div className="session-label"><span className="live-dot" /> ongoing thread <ChevronDown size={14} /></div><div className="top-actions"><button className="icon-button" aria-label="Search" onClick={() => setSearchOpen(true)}><Search size={17} /></button><button className={`memory-toggle ${memoryOpen ? 'active' : ''}`} onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen}><BookOpen size={15} /> <span>Memory</span><span className="memory-number">{storylines.length + proposals.length}</span></button><button className="icon-button mobile-menu" aria-label="Open menu"><Menu size={18} /></button></div></header>{mode === 'voice' ? <VoiceScreen onBack={() => setMode('text')} onSend={send} /> : <><section ref={chatRef} className={`chat-area ${hasMessages ? 'has-messages' : ''}`}>{hasMessages ? <div className="message-list">{messages.map(m => <Message key={m.id} message={m} />)}{busy && <div className="thinking"><span className="mini-spark"><Sparkles size={11} /></span><span className="thinking-label">River is thinking</span><i /><i /><i /></div>}</div> : <EmptyState user={user} onSeed={seed} />}</section>{error && <div className="connection-notice" role="status">{error}</div>}<Composer onSend={send} busy={busy} mode={mode} setMode={setMode} /></>}</main>{memoryOpen && <><button className="memory-backdrop" aria-label="Dismiss memory overlay" onClick={() => setMemoryOpen(false)} /><MemoryPanel storylines={storylines} proposals={proposals} onUpdate={update} onDelete={remove} onApprove={approveProposal} onReject={rejectProposal} onClose={() => setMemoryOpen(false)} /></>}</div>{privacyOpen && <PrivacyPanel user={user} enabled={memoryEnabled} onToggle={toggleMemory} onExport={exportData} onClose={() => setPrivacyOpen(false)} onAccountDeleted={onLogout} />}{searchOpen && <SearchPanel onClose={() => setSearchOpen(false)} onSelectThread={loadThread} />}</>
 }
 
 function Root() {

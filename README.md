@@ -57,13 +57,22 @@ Set `NODE_ENV=production`, unique `JWT_SECRET` and `FIELD_ENCRYPTION_KEY` values
 - Server-side Groq chat integration for real companion responses, with Gemini and deterministic local fallbacks when no key is configured.
 - Persistent multi-conversation threads and search across conversations and approved memories.
 - User-controlled memory proposals, privacy preferences, and JSON data export.
-- Optional Realtime voice path with clear permission, failure, and reconnect states when an API key is configured.
+- Groq voice mode: microphone recording, Whisper transcription, the same River memory-aware reply, and Orpheus speech output. Recordings are not stored by River.
 - Health, readiness, and authenticated metrics endpoints plus CI build/audit checks.
 - Authenticator-app MFA, refresh-session device listing/revocation, and transactional password-reset delivery interfaces.
 
-## Optional live integrations
+## Groq voice setup
 
-Set `OPENAI_API_KEY` and `REALTIME_MODEL=gpt-realtime` only if you want live AI responses and voice. River remains fully demoable without them.
+Set these optional values in the ignored `.env` file to override the defaults:
+
+```bash
+GROQ_TRANSCRIPTION_MODEL=whisper-large-v3-turbo
+GROQ_SPEECH_MODEL=canopylabs/orpheus-v1-english
+```
+
+Voice is turn-based by design: start recording, stop to submit, then River transcribes, replies in the active conversation thread, and speaks the reply. River does not persist the audio recording.
+
+Before the first spoken reply, open Groq's Orpheus English model in its playground and accept its one-time model terms. River shows a direct instruction if this has not been completed.
 
 For a production launch, replace local SQLite with managed encrypted storage and complete independent security, privacy, and model-safety reviews.
 

@@ -15,6 +15,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'kindred-local-demo-secret'
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5'
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3-flash-preview'
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'
+const GROQ_TRANSCRIPTION_MODEL = process.env.GROQ_TRANSCRIPTION_MODEL || 'whisper-large-v3-turbo'
+const GROQ_SPEECH_MODEL = process.env.GROQ_SPEECH_MODEL || 'canopylabs/orpheus-v1-english'
 const REALTIME_MODEL = process.env.REALTIME_MODEL || 'gpt-realtime'
 const allowedOrigin = process.env.APP_ORIGIN || `http://127.0.0.1:${PORT}`
 const RETENTION_DAYS = Math.max(30, Number(process.env.RETENTION_DAYS || 365))
@@ -600,7 +602,43 @@ app.delete('/api/storylines/:id', auth, (req, res) => {
   res.json({ ok: true })
 })
 
-app.get('/api/voice/session', auth, (req, res) => res.json({ enabled: Boolean(process.env.OPENAI_API_KEY), model: REALTIME_MODEL, message: process.env.OPENAI_API_KEY ? 'Voice is ready to connect.' : 'Voice is not configured for this environment.' }))
+app.get('/api/voice/session', auth, (req, res) => {
+  if (process.env.GROQ_API_KEY) return res.json({ enabled: true, provider: 'groq', transcription_model: GROQ_TRANSCRIPTION_MODEL, speech_model: GROQ_SPEECH_MODEL, message: 'Groq voice is ready.' })
+  res.json({ enabled: Boolean(process.env.OPENAI_API_KEY), provider: process.env.OPENAI_API_KEY ? 'openai-realtime' : null, model: REALTIME_MODEL, message: process.env.OPENAI_API_KEY ? 'Voice is ready to connect.' : 'Voice is not configured for this environment.' })
+})
+app.post('/api/voice/transcribe', auth, express.raw({ type: 'audio/*', limit: '25mb' }), async (req, res) => {
+  if (!process.env.GROQ_API_KEY) return res.status(503).json({ error: 'Groq voice is not configured for this environment.' })
+  if (!Buffer.isBuffer(req.body) || req.body.length < 32) return res.status(400).json({ error: 'A short audio recording is required.' })
+  try {
+    const form = new FormData()
+    form.append('file', new Blob([req.body], { type: req.headers['content-type'] || 'audio/webm' }), 'river-voice.webm')
+    form.append('model', GROQ_TRANSCRIPTION_MODEL)
+    form.append('response_format', 'json')
+    const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` }, body: form, signal: AbortSignal.timeout(45_000) })
+    if (!response.ok) throw new Error(`Groq transcription failed (${response.status}).`)
+    const data = await response.json()
+    const transcript = String(data.text || '').trim()
+    if (!transcript) return res.status(422).json({ error: 'River could not hear any speech. Try again in a quieter place.' })
+    audit(req, 'voice.transcribed', { audio_bytes: req.body.length, transcript_length: transcript.length })
+    res.json({ transcript })
+  } catch (error) { console.error(error.message); res.status(502).json({ error: 'River could not transcribe this recording. Please try again.' }) }
+})
+app.post('/api/voice/speak', auth, async (req, res) => {
+  if (!process.env.GROQ_API_KEY) return res.status(503).json({ error: 'Groq voice is not configured for this environment.' })
+  const text = String(req.body?.text || '').trim().slice(0, 200)
+  if (!text) return res.status(400).json({ error: 'Text is required for speech.' })
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/audio/speech', { method: 'POST', headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: GROQ_SPEECH_MODEL, voice: 'hannah', input: text, response_format: 'wav' }), signal: AbortSignal.timeout(45_000) })
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({}))
+      if (failure.error?.code === 'model_terms_required') return res.status(412).json({ error: 'Groq requires one-time acceptance for its Orpheus voice model. Open the Groq playground, select Orpheus English, accept its terms, then try voice again.' })
+      throw new Error(`Groq speech failed (${response.status}).`)
+    }
+    const audio = Buffer.from(await response.arrayBuffer())
+    audit(req, 'voice.spoken', { text_length: text.length })
+    res.setHeader('Content-Type', 'audio/wav').setHeader('Cache-Control', 'no-store').send(audio)
+  } catch (error) { console.error(error.message); res.status(502).json({ error: 'River could not create spoken audio. Your text reply is still available.' }) }
+})
 app.post('/api/voice/call', auth, async (req, res) => {
   if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'Voice is not configured for this environment.' })
   const sdp = String(req.body?.sdp || '')
