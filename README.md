@@ -29,6 +29,8 @@ Open `http://127.0.0.1:5173`. The Vite development server proxies API requests t
 
 For a demo walkthrough and video storyboard, see [HACKATHON_DEMO.md](HACKATHON_DEMO.md).
 
+For the Build Week submission checklist and personal-description outline, see [HACKATHON_SUBMISSION.md](HACKATHON_SUBMISSION.md).
+
 ## Verification
 
 ```bash
@@ -79,3 +81,9 @@ For a production launch, replace local SQLite with managed encrypted storage and
 ## Project standards
 
 River is released under the [MIT License](LICENSE). See [CONTRIBUTING.md](CONTRIBUTING.md) for local workflow and product principles.
+
+## Built with Codex and GPT-5.6
+
+River was built collaboratively in Codex with GPT-5.6 Terra during OpenAI Build Week. Codex was used throughout the project to implement and test the React/Express application, improve the responsive interaction design, integrate and validate the model/voice flows, add privacy controls, run smoke tests and dependency audits, and maintain the GitHub repository.
+
+The product decisions, scope, naming, model-provider choice, demo direction, and final submission narrative remain the builder's own. This README documents what is actually in the repository; it does not claim that unfinished production infrastructure is complete.
