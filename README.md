@@ -1,15 +1,39 @@
 # River
 
-River is a continuous, memory-aware AI companion. It keeps an ongoing thread instead of treating every conversation as a blank slate.
+> A continuous, memory-aware AI companion that keeps the thread—without taking control of it.
 
-## Local development
+River is built for the thoughts, plans, and personal projects that do not fit into a single chat. It carries forward only the storylines a person explicitly approves, so every memory stays visible, editable, and reversible.
+
+## Why River
+
+Most conversational AI starts from zero. River is designed around continuity with consent:
+
+- **Multiple conversation threads** for different moments and contexts.
+- **Memory proposals, not silent profiling**—users approve or reject every new storyline.
+- **Searchable continuity** across conversations and approved memories.
+- **Real ownership controls**: edit, export, revoke memory consent, or delete the account.
+- **Privacy-ready foundations** including secure browser sessions, CSRF protection, MFA, and device-session controls.
+
+## Hackathon quick start
+
+No paid service or API key is required for the complete text-and-memory demo.
 
 ```bash
 npm install
 npm run dev
 ```
 
-The app runs at `http://127.0.0.1:8787`.
+Open `http://127.0.0.1:5173`. The Vite development server proxies API requests to River’s local API at port `8787`.
+
+For a demo walkthrough and video storyboard, see [HACKATHON_DEMO.md](HACKATHON_DEMO.md).
+
+## Verification
+
+```bash
+npm run test:smoke
+npm run build
+npm audit --audit-level=high
+```
 
 ## Container deployment
 
@@ -22,7 +46,7 @@ docker run --rm -p 8787:8787 -v river-data:/app/data -e DATABASE_PATH=/app/data/
 
 Set `NODE_ENV=production`, unique `JWT_SECRET` and `FIELD_ENCRYPTION_KEY` values, and production CORS settings before exposing River publicly. `FIELD_ENCRYPTION_KEY` encrypts authenticator-app MFA secrets at rest and must be independently rotated from the JWT secret. Browser sessions use secure HTTP-only cookies plus a CSRF token; terminate TLS before the container and preserve the forwarded HTTPS protocol. The included container is a deployment interface, not a substitute for managed database backups, TLS termination, key management, or an independent security review.
 
-## Current state
+## What is included
 
 - Responsive chat shell for mobile, tablet, and laptop layouts.
 - Separate chat and memory scrolling surfaces.
@@ -31,13 +55,16 @@ Set `NODE_ENV=production`, unique `JWT_SECRET` and `FIELD_ENCRYPTION_KEY` values
 - Deterministic local reply fallback while model integration is pending.
 - Persistent multi-conversation threads and search across conversations and approved memories.
 - User-controlled memory proposals, privacy preferences, and JSON data export.
-- Voice permission/session readiness UI with clear failure and retry states; a server-side Realtime session provider still needs to be configured.
+- Optional Realtime voice path with clear permission, failure, and reconnect states when an API key is configured.
 - Health, readiness, and authenticated metrics endpoints plus CI build/audit checks.
 - Authenticator-app MFA, refresh-session device listing/revocation, and transactional password-reset delivery interfaces.
 
-## Next build priorities
+## Optional live integrations
 
-1. Set `OPENAI_API_KEY` and `REALTIME_MODEL=gpt-realtime` in the server environment to activate the included server-proxied WebRTC voice call path. Confirm provider billing, rate limits, voice policy, and transcript-retention settings before enabling it for users.
-2. Replace the local SQLite deployment path with managed encrypted storage, backups, restore drills, and regional controls.
-3. Add browser regression coverage at mobile and desktop breakpoints, then run load/soak testing.
-4. Complete external production gates: transactional email, MFA/passkeys, independent penetration/privacy/model-safety reviews, and incident response ownership.
+Set `OPENAI_API_KEY` and `REALTIME_MODEL=gpt-realtime` only if you want live AI responses and voice. River remains fully demoable without them.
+
+For a production launch, replace local SQLite with managed encrypted storage and complete independent security, privacy, and model-safety reviews.
+
+## Project standards
+
+River is released under the [MIT License](LICENSE). See [CONTRIBUTING.md](CONTRIBUTING.md) for local workflow and product principles.
