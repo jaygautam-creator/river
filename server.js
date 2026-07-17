@@ -231,9 +231,6 @@ function auth(req, res, next) {
 function getStorylines(userId) {
   return db.prepare("SELECT * FROM storylines WHERE user_id = ? ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'stale' THEN 1 ELSE 2 END, last_updated_at DESC").all(userId).map(parseStoryline)
 }
-function getRecentlyUpdatedStorylines(userId) {
-  return db.prepare("SELECT * FROM storylines WHERE user_id = ? AND status != 'resolved' ORDER BY last_updated_at DESC LIMIT 5").all(userId).map(parseStoryline)
-}
 function parseStoryline(row) { return { ...row, source_quotes: JSON.parse(row.source_quotes || '[]') } }
 function getProposals(userId) { return db.prepare("SELECT * FROM memory_proposals WHERE user_id = ? AND status = 'pending' ORDER BY created_at DESC").all(userId) }
 
@@ -318,12 +315,6 @@ function memoryRecallReply(storylines) {
   if (!earlier.length) return `${lead} Is that the conversation you mean?`
   const otherTopics = earlier.slice(0, 2).map(storyline => storyline.topic.toLowerCase()).join(' and ')
   return `${lead} I also have ${otherTopics} in mind. Is the most recent one what you wanted to return to?`
-}
-
-function isRecallContinuation(userId, threadId, content) {
-  if (content.length > 160) return false
-  const previousAssistant = db.prepare("SELECT content FROM messages WHERE user_id = ? AND thread_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1").get(userId, threadId)
-  return Boolean(previousAssistant && /I do remember the parts you asked me to keep/i.test(previousAssistant.content))
 }
 
 function generateLocalReply(content, storylines, userName) {
@@ -610,17 +601,10 @@ app.post('/api/chat', auth, async (req, res) => {
     const result = db.prepare('INSERT INTO memory_proposals (user_id, topic, summary, source_quote, confidence) VALUES (?, ?, ?, ?, ?)').run(req.user.id, candidate.topic, candidate.summary, candidate.source_quote, candidate.confidence)
     proposal = db.prepare('SELECT * FROM memory_proposals WHERE id = ?').get(result.lastInsertRowid)
   }
-  const recallRequest = isMemoryRecallRequest(content)
-  const recallContinuation = !recallRequest && isRecallContinuation(req.user.id, thread.id, content)
-  let context = relevantStorylines(req.user.id, content)
-  if (recallRequest || recallContinuation) {
-    const recent = getRecentlyUpdatedStorylines(req.user.id)
-    const matching = context.length ? context : recent
-    context = matching.length ? matching : recent
-  }
+  const context = relevantStorylines(req.user.id, content)
   let reply
   let provider = configuredModelProvider()
-  const directRecall = (recallRequest || recallContinuation) ? memoryRecallReply(context) : null
+  const directRecall = isMemoryRecallRequest(content) ? memoryRecallReply(context) : null
   try { reply = directRecall || await generateReply(content, context, req.user.name) } catch (error) {
     console.error(error.message)
     provider = 'local-fallback'
