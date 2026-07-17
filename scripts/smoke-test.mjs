@@ -19,7 +19,7 @@ const email = `smoke-${Date.now()}@river.local`
 const signup = await fetch(`${base}/api/auth/signup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'River Smoke', email, password: 'smoke-password-123' }) })
 if (!signup.ok) throw new Error(`Signup failed: ${signup.status}`)
 const session = await signup.json()
-const authHeaders = { Authorization: `Bearer ${session.token}` }
+let authHeaders = { Authorization: `Bearer ${session.token}` }
 const cookieHeader = signup.headers.getSetCookie().map(cookie => cookie.split(';')[0]).join('; ')
 const csrfToken = cookieHeader.split('; ').find(cookie => cookie.startsWith('river_csrf='))?.slice('river_csrf='.length)
 if (!cookieHeader.includes('river_access=') || !csrfToken) throw new Error('Secure session cookies were not issued')
@@ -48,6 +48,10 @@ const mfa = await mfaSetup.json()
 const otp = new OTPAuth.TOTP({ issuer: 'River', label: email, secret: OTPAuth.Secret.fromBase32(mfa.secret), algorithm: 'SHA1', digits: 6, period: 30 }).generate()
 const mfaEnable = await fetch(`${base}/api/auth/mfa/enable`, { method: 'POST', headers: { ...authHeaders, 'content-type': 'application/json' }, body: JSON.stringify({ otp }) })
 if (!mfaEnable.ok) throw new Error(`MFA enable failed: ${mfaEnable.status}`)
+const mfaSession = await mfaEnable.json()
+const invalidatedSession = await fetch(`${base}/api/auth/me`, { headers: authHeaders })
+if (invalidatedSession.status !== 401) throw new Error('MFA did not invalidate the prior access token')
+authHeaders = { Authorization: `Bearer ${mfaSession.token}` }
 const deniedMfaLogin = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password: 'smoke-password-123' }) })
 if (deniedMfaLogin.status !== 401) throw new Error('MFA was not required on login')
 const allowedMfaLogin = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password: 'smoke-password-123', otp }) })

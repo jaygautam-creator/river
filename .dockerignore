@@ -3,4 +3,9 @@ dist
 .git
 .env
 river.db
+kindred.db
+*.db
+*.db-shm
+*.db-wal
+backups
 npm-debug.log*

@@ -32,6 +32,7 @@ db.exec(`
     name TEXT NOT NULL,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    session_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS threads (
@@ -123,6 +124,7 @@ if (!userColumns.includes('retention_days')) db.exec('ALTER TABLE users ADD COLU
 if (!userColumns.includes('mfa_secret')) db.exec('ALTER TABLE users ADD COLUMN mfa_secret TEXT')
 if (!userColumns.includes('mfa_enabled_at')) db.exec('ALTER TABLE users ADD COLUMN mfa_enabled_at TEXT')
 if (!userColumns.includes('email_verified_at')) db.exec('ALTER TABLE users ADD COLUMN email_verified_at TEXT')
+if (!userColumns.includes('session_version')) db.exec('ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1')
 const messageColumns = db.prepare('PRAGMA table_info(messages)').all().map(column => column.name)
 if (!messageColumns.includes('thread_id')) db.exec('ALTER TABLE messages ADD COLUMN thread_id INTEGER REFERENCES threads(id) ON DELETE CASCADE')
 const refreshColumns = db.prepare('PRAGMA table_info(refresh_tokens)').all().map(column => column.name)
@@ -178,7 +180,7 @@ app.use((req, res, next) => {
 
 const now = () => new Date().toISOString()
 const audit = (req, event, metadata = {}) => db.prepare('INSERT INTO audit_events (user_id, event, request_id, metadata) VALUES (?, ?, ?, ?)').run(req.user?.id || null, event, req.requestId, JSON.stringify(metadata))
-const tokenFor = (user) => jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, { expiresIn: '30d' })
+const tokenFor = (user) => jwt.sign({ id: user.id, email: user.email, name: user.name, session_version: user.session_version }, JWT_SECRET, { expiresIn: '30d' })
 const publicUser = (user) => ({ id: user.id, name: user.name, email: user.email, mfa_enabled: Boolean(user.mfa_enabled_at), email_verified: Boolean(user.email_verified_at) })
 const readCookie = (req, name) => String(req.headers.cookie || '').split(';').map(part => part.trim()).find(part => part.startsWith(`${name}=`))?.slice(name.length + 1)
 const cookieOptions = (httpOnly = true) => ({ httpOnly, secure: isProduction, sameSite: 'lax', path: '/', maxAge: 1000 * 60 * 60 * 24 * 30 })
@@ -242,6 +244,10 @@ const encryptField = value => { const iv = crypto.randomBytes(12); const cipher 
 const decryptField = value => { const [iv, tag, ciphertext] = String(value || '').split('.').map(x => Buffer.from(x, 'base64url')); const decipher = crypto.createDecipheriv('aes-256-gcm', fieldKey, iv); decipher.setAuthTag(tag); return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8') }
 const verifyMfa = (user, token) => { try { if (!user?.mfa_secret || !/^\d{6}$/.test(String(token || ''))) return false; return new OTPAuth.TOTP({ issuer: 'River', label: user.email, secret: OTPAuth.Secret.fromBase32(decryptField(user.mfa_secret)), algorithm: 'SHA1', digits: 6, period: 30 }).validate({ token: String(token), window: 1 }) !== null } catch { return false } }
 const revokeRefreshToken = token => db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL').run(now(), hashToken(token))
+const invalidateUserSessions = userId => db.transaction(() => {
+  db.prepare('UPDATE users SET session_version = session_version + 1 WHERE id = ?').run(userId)
+  db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').run(now(), userId)
+})()
 const runRetentionCleanup = () => {
   const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString()
   db.transaction(() => {
@@ -265,7 +271,10 @@ function auth(req, res, next) {
   const header = req.headers.authorization || ''
   const token = header.startsWith('Bearer ') ? header.slice(7) : readCookie(req, 'river_access')
   try {
-    req.user = jwt.verify(token, JWT_SECRET)
+    const claims = jwt.verify(token, JWT_SECRET)
+    const user = db.prepare('SELECT id, email, name, session_version FROM users WHERE id = ?').get(claims.id)
+    if (!user || claims.session_version !== user.session_version) throw new Error('Session is no longer valid.')
+    req.user = { ...claims, session_version: user.session_version }
     next()
   } catch { res.status(401).json({ error: 'Please sign in again.' }) }
 }
@@ -478,16 +487,24 @@ app.post('/api/auth/mfa/setup', auth, (req, res) => {
 app.post('/api/auth/mfa/enable', auth, (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)
   if (!user?.mfa_secret || !verifyMfa(user, req.body?.otp)) return res.status(400).json({ error: 'Enter a valid authenticator code to enable MFA.' })
-  db.prepare('UPDATE users SET mfa_enabled_at = ? WHERE id = ?').run(now(), user.id)
+  db.transaction(() => {
+    db.prepare('UPDATE users SET mfa_enabled_at = ?, session_version = session_version + 1 WHERE id = ?').run(now(), user.id)
+    db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').run(now(), user.id)
+  })()
+  const refreshedUser = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)
   audit(req, 'auth.mfa_enabled')
-  res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)) })
+  respondSession(res, refreshedUser, req)
 })
 app.post('/api/auth/mfa/disable', auth, (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)
   if (!verifyMfa(user, req.body?.otp)) return res.status(400).json({ error: 'Enter a valid authenticator code to disable MFA.' })
-  db.prepare('UPDATE users SET mfa_secret = NULL, mfa_enabled_at = NULL WHERE id = ?').run(user.id)
+  db.transaction(() => {
+    db.prepare('UPDATE users SET mfa_secret = NULL, mfa_enabled_at = NULL, session_version = session_version + 1 WHERE id = ?').run(user.id)
+    db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').run(now(), user.id)
+  })()
+  const refreshedUser = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)
   audit(req, 'auth.mfa_disabled')
-  res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)) })
+  respondSession(res, refreshedUser, req)
 })
 app.post('/api/auth/password-reset/request', async (req, res) => {
   const email = String(req.body?.email || '').toLowerCase().trim()
@@ -511,7 +528,7 @@ app.post('/api/auth/password-reset/complete', (req, res) => {
   const row = db.prepare('SELECT * FROM password_reset_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?').get(hashToken(token), now())
   if (!row) return res.status(400).json({ error: 'Recovery token is invalid or expired.' })
   db.transaction(() => {
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(password, 12), row.user_id)
+    db.prepare('UPDATE users SET password_hash = ?, session_version = session_version + 1 WHERE id = ?').run(bcrypt.hashSync(password, 12), row.user_id)
     db.prepare('UPDATE password_reset_tokens SET used_at = ? WHERE id = ?').run(now(), row.id)
     db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').run(now(), row.user_id)
   })()
