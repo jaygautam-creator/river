@@ -20,6 +20,8 @@ const GROQ_SPEECH_MODEL = process.env.GROQ_SPEECH_MODEL || 'canopylabs/orpheus-v
 const REALTIME_MODEL = process.env.REALTIME_MODEL || 'gpt-realtime'
 const allowedOrigin = process.env.APP_ORIGIN || `http://127.0.0.1:${PORT}`
 const RETENTION_DAYS = Math.max(30, Number(process.env.RETENTION_DAYS || 365))
+const LOGIN_LOCKOUT_ATTEMPTS = Math.max(3, Number(process.env.LOGIN_LOCKOUT_ATTEMPTS || 5))
+const LOGIN_LOCKOUT_MINUTES = Math.max(1, Number(process.env.LOGIN_LOCKOUT_MINUTES || 15))
 const isProduction = process.env.NODE_ENV === 'production'
 if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) throw new Error('JWT_SECRET must be configured in production.')
 if (process.env.NODE_ENV === 'production' && !process.env.FIELD_ENCRYPTION_KEY) throw new Error('FIELD_ENCRYPTION_KEY must be configured in production.')
@@ -125,6 +127,8 @@ if (!userColumns.includes('mfa_secret')) db.exec('ALTER TABLE users ADD COLUMN m
 if (!userColumns.includes('mfa_enabled_at')) db.exec('ALTER TABLE users ADD COLUMN mfa_enabled_at TEXT')
 if (!userColumns.includes('email_verified_at')) db.exec('ALTER TABLE users ADD COLUMN email_verified_at TEXT')
 if (!userColumns.includes('session_version')) db.exec('ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1')
+if (!userColumns.includes('failed_login_count')) db.exec('ALTER TABLE users ADD COLUMN failed_login_count INTEGER NOT NULL DEFAULT 0')
+if (!userColumns.includes('locked_until')) db.exec('ALTER TABLE users ADD COLUMN locked_until TEXT')
 const messageColumns = db.prepare('PRAGMA table_info(messages)').all().map(column => column.name)
 if (!messageColumns.includes('thread_id')) db.exec('ALTER TABLE messages ADD COLUMN thread_id INTEGER REFERENCES threads(id) ON DELETE CASCADE')
 const refreshColumns = db.prepare('PRAGMA table_info(refresh_tokens)').all().map(column => column.name)
@@ -244,6 +248,13 @@ const encryptField = value => { const iv = crypto.randomBytes(12); const cipher 
 const decryptField = value => { const [iv, tag, ciphertext] = String(value || '').split('.').map(x => Buffer.from(x, 'base64url')); const decipher = crypto.createDecipheriv('aes-256-gcm', fieldKey, iv); decipher.setAuthTag(tag); return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8') }
 const verifyMfa = (user, token) => { try { if (!user?.mfa_secret || !/^\d{6}$/.test(String(token || ''))) return false; return new OTPAuth.TOTP({ issuer: 'River', label: user.email, secret: OTPAuth.Secret.fromBase32(decryptField(user.mfa_secret)), algorithm: 'SHA1', digits: 6, period: 30 }).validate({ token: String(token), window: 1 }) !== null } catch { return false } }
 const revokeRefreshToken = token => db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL').run(now(), hashToken(token))
+const recordFailedLogin = (req, user) => {
+  const failures = (user.failed_login_count || 0) + 1
+  const lockedUntil = failures >= LOGIN_LOCKOUT_ATTEMPTS ? new Date(Date.now() + LOGIN_LOCKOUT_MINUTES * 60_000).toISOString() : null
+  db.prepare('UPDATE users SET failed_login_count = ?, locked_until = ? WHERE id = ?').run(failures, lockedUntil, user.id)
+  audit(req, 'auth.login_failed', { locked: Boolean(lockedUntil) })
+  return Boolean(lockedUntil)
+}
 const invalidateUserSessions = userId => db.transaction(() => {
   db.prepare('UPDATE users SET session_version = session_version + 1 WHERE id = ?').run(userId)
   db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').run(now(), userId)
@@ -444,8 +455,16 @@ app.post('/api/auth/signup', (req, res) => {
 
 app.post('/api/auth/login', (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get((req.body.email || '').toLowerCase().trim())
-  if (!user || !bcrypt.compareSync(req.body.password || '', user.password_hash)) return res.status(401).json({ error: 'That email and password don’t match.' })
-  if (user.mfa_enabled_at && !verifyMfa(user, req.body?.otp)) return res.status(401).json({ error: 'Enter the current code from your authenticator app.', mfa_required: true })
+  if (user?.locked_until && new Date(user.locked_until).getTime() > Date.now()) return res.status(429).json({ error: 'Too many unsuccessful sign-in attempts. Try again later or reset your password.' })
+  if (!user || !bcrypt.compareSync(req.body.password || '', user.password_hash)) {
+    if (user) recordFailedLogin(req, user)
+    return res.status(401).json({ error: 'That email and password don’t match.' })
+  }
+  if (user.mfa_enabled_at && !verifyMfa(user, req.body?.otp)) {
+    recordFailedLogin(req, user)
+    return res.status(401).json({ error: 'Enter the current code from your authenticator app.', mfa_required: true })
+  }
+  db.prepare('UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = ?').run(user.id)
   audit(req, 'auth.login')
   respondSession(res, user, req)
 })
@@ -528,7 +547,7 @@ app.post('/api/auth/password-reset/complete', (req, res) => {
   const row = db.prepare('SELECT * FROM password_reset_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?').get(hashToken(token), now())
   if (!row) return res.status(400).json({ error: 'Recovery token is invalid or expired.' })
   db.transaction(() => {
-    db.prepare('UPDATE users SET password_hash = ?, session_version = session_version + 1 WHERE id = ?').run(bcrypt.hashSync(password, 12), row.user_id)
+    db.prepare('UPDATE users SET password_hash = ?, session_version = session_version + 1, failed_login_count = 0, locked_until = NULL WHERE id = ?').run(bcrypt.hashSync(password, 12), row.user_id)
     db.prepare('UPDATE password_reset_tokens SET used_at = ? WHERE id = ?').run(now(), row.id)
     db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').run(now(), row.user_id)
   })()

@@ -56,6 +56,15 @@ const deniedMfaLogin = await fetch(`${base}/api/auth/login`, { method: 'POST', h
 if (deniedMfaLogin.status !== 401) throw new Error('MFA was not required on login')
 const allowedMfaLogin = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password: 'smoke-password-123', otp }) })
 if (!allowedMfaLogin.ok) throw new Error(`MFA login failed: ${allowedMfaLogin.status}`)
+const lockoutEmail = `lockout-${Date.now()}@river.local`
+const lockoutSignup = await fetch(`${base}/api/auth/signup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Lockout smoke', email: lockoutEmail, password: 'lockout-password-123' }) })
+if (!lockoutSignup.ok) throw new Error(`Lockout signup failed: ${lockoutSignup.status}`)
+for (let attempt = 0; attempt < 5; attempt += 1) {
+  const failed = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: lockoutEmail, password: 'incorrect-password' }) })
+  if (failed.status !== 401) throw new Error(`Expected failed login status 401, got ${failed.status}`)
+}
+const locked = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: lockoutEmail, password: 'lockout-password-123' }) })
+if (locked.status !== 429) throw new Error(`Account lockout failed: ${locked.status}`)
 const voiceSession = await fetch(`${base}/api/voice/session`, { headers: authHeaders })
 const voiceConfig = await voiceSession.json()
 if (!voiceSession.ok) throw new Error('Voice configuration check failed')

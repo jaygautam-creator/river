@@ -73,7 +73,7 @@ EMAIL_FROM="River <hello@example.com>"
 - User-controlled memory proposals, privacy preferences, and JSON data export.
 - Hands-free Groq voice mode: start once, speak naturally, River detects a pause, replies aloud, and resumes listening. Speaking while River is talking interrupts the response. Recordings are not stored by River.
 - Health, readiness, and authenticated metrics endpoints plus CI build/audit checks.
-- Email verification, authenticator-app MFA, refresh-session device listing/revocation, and transactional password-reset delivery interfaces.
+- Email verification, authenticator-app MFA, refresh-session device listing/revocation, temporary failed-login lockout, and transactional password-reset delivery interfaces.
 
 ## Groq voice setup
 
