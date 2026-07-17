@@ -23,16 +23,25 @@ const apiAudio = async (path, blob) => {
 }
 
 function Auth({ onAuth }) {
-  const [mode, setMode] = useState('signup')
+  const [mode, setMode] = useState(() => new URLSearchParams(window.location.search).has('reset_token') ? 'reset' : 'signup')
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [otp, setOtp] = useState('')
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
   const submit = async e => {
-    e.preventDefault(); setBusy(true); setError('')
+    e.preventDefault(); setBusy(true); setError(''); setNotice('')
     try {
+      if (mode === 'recovery') { const data = await api('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email }) }); setNotice(data.message); return }
+      if (mode === 'reset') {
+        if (password !== confirmPassword) throw new Error('Passwords do not match.')
+        const token = new URLSearchParams(window.location.search).get('reset_token')
+        await api('/api/auth/password-reset/complete', { method: 'POST', body: JSON.stringify({ token, password }) })
+        window.history.replaceState({}, '', window.location.pathname); setMode('login'); setPassword(''); setConfirmPassword(''); setNotice('Your password was reset. You can sign in now.'); return
+      }
       const data = await api(`/api/auth/${mode}`, { method: 'POST', body: JSON.stringify({ name, email, password, otp }) })
       localStorage.removeItem('kindred_token'); onAuth(data.user)
     } catch (err) { setError(err.message) } finally { setBusy(false) }
@@ -42,15 +51,19 @@ function Auth({ onAuth }) {
     <div className="auth-brand"><div className="brand-mark"><Sparkles size={17} /></div><span>river</span></div>
     <section className="auth-card">
       <div className="auth-intro"><div className="eyebrow"><span className="eyebrow-dot" /> a little more human</div><h1>Keep the thread.</h1><p>A companion that remembers what matters to you — and brings it back at the right moment.</p></div>
-      <div className="auth-tabs"><button className={mode === 'signup' ? 'active' : ''} onClick={() => setMode('signup')}>Create account</button><button className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>Sign in</button></div>
+      {mode !== 'recovery' && mode !== 'reset' && <div className="auth-tabs"><button className={mode === 'signup' ? 'active' : ''} onClick={() => { setMode('signup'); setError(''); setNotice('') }}>Create account</button><button className={mode === 'login' ? 'active' : ''} onClick={() => { setMode('login'); setError(''); setNotice('') }}>Sign in</button></div>}
       <form onSubmit={submit} className="auth-form">
         {mode === 'signup' && <label>Your name<input value={name} onChange={e => setName(e.target.value)} placeholder="What should I call you?" required /></label>}
-        <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" required /></label>
-        <label>Password<input type="password" minLength="6" value={password} onChange={e => setPassword(e.target.value)} placeholder="At least 6 characters" required /></label>
+        {mode !== 'reset' && <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" required /></label>}
+        {mode !== 'recovery' && <label>{mode === 'reset' ? 'New password' : 'Password'}<input type="password" minLength={mode === 'reset' ? 12 : 6} value={password} onChange={e => setPassword(e.target.value)} placeholder={mode === 'reset' ? 'At least 12 characters' : 'At least 6 characters'} required /></label>}
+        {mode === 'reset' && <label>Confirm new password<input type="password" minLength="12" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} placeholder="Repeat your new password" required /></label>}
         {mode === 'login' && <label>Authenticator code <small className="field-optional">only if you enabled MFA</small><input inputMode="numeric" autoComplete="one-time-code" value={otp} onChange={e => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="123456" /></label>}
         {error && <div className="form-error">{error}</div>}
-        <button className="primary-button auth-submit" disabled={busy}>{busy ? <Loader2 className="spin" size={17} /> : mode === 'signup' ? 'Begin your thread' : 'Welcome back'}<ArrowUp size={17} /></button>
+        {notice && <div className="auth-notice" role="status">{notice}</div>}
+        <button className="primary-button auth-submit" disabled={busy}>{busy ? <Loader2 className="spin" size={17} /> : mode === 'signup' ? 'Begin your thread' : mode === 'login' ? 'Welcome back' : mode === 'recovery' ? 'Send recovery instructions' : 'Save new password'}<ArrowUp size={17} /></button>
       </form>
+      {mode === 'login' && <button className="auth-link" onClick={() => { setMode('recovery'); setError(''); setNotice('') }}>Forgot your password?</button>}
+      {(mode === 'recovery' || mode === 'reset') && <button className="auth-link" onClick={() => { window.history.replaceState({}, '', window.location.pathname); setMode('login'); setError(''); setNotice('') }}>Back to sign in</button>}
       <div className="auth-note"><BookOpen size={14} /> Your conversations and memories are private to your account.</div>
     </section>
     <div className="auth-footer">Built for the in-between moments <span>·</span> river v0.1</div>
