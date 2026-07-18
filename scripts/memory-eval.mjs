@@ -41,7 +41,25 @@ const totals = outcomes.reduce((metrics, outcome) => {
 const precision = totals.truePositive / Math.max(1, totals.truePositive + totals.falsePositive)
 const recall = totals.truePositive / Math.max(1, totals.truePositive + totals.falseNegative)
 const f1 = (2 * precision * recall) / Math.max(0.0001, precision + recall)
-const report = { evaluated_at: new Date().toISOString(), base, totals, precision, recall, f1, outcomes }
+
+// Cross-thread recall is tested separately from proposal extraction. River may only
+// retrieve an approved summary, never raw conversation history from another thread.
+const recallEmail = `memory-recall-${Date.now()}-${Math.random().toString(16).slice(2)}@river.local`
+const recallAccount = await request('/api/auth/signup', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Recall evaluation', email: recallEmail, password: 'memory-evaluation-password' }) })
+const recallHeaders = { Authorization: `Bearer ${recallAccount.token}`, 'content-type': 'application/json' }
+const firstThread = await request('/api/threads', { method: 'POST', headers: recallHeaders, body: JSON.stringify({ title: 'First conversation' }) })
+const source = 'I am building a photo journal for my grandmother’s recipes and want to keep working on it this summer.'
+const sourceResult = await request('/api/chat', { method: 'POST', headers: recallHeaders, body: JSON.stringify({ thread_id: firstThread.thread.id, content: source }) })
+if (sourceResult.proposal?.id) await request(`/api/memory/proposals/${sourceResult.proposal.id}/approve`, { method: 'POST', headers: recallHeaders, body: '{}' })
+const secondThread = await request('/api/threads', { method: 'POST', headers: recallHeaders, body: JSON.stringify({ title: 'A new conversation' }) })
+const recallResult = await request('/api/chat', { method: 'POST', headers: recallHeaders, body: JSON.stringify({ thread_id: secondThread.thread.id, content: 'What do you remember from our previous conversation about my project?' }) })
+const crossThreadRecall = {
+  proposal_created: Boolean(sourceResult.proposal?.id),
+  answer: recallResult.reply,
+  passed: Boolean(sourceResult.proposal?.id) && /(photo journal|grandmother|recipe)/i.test(recallResult.reply || '')
+}
+
+const report = { evaluated_at: new Date().toISOString(), base, totals, precision, recall, f1, cross_thread_recall: crossThreadRecall, outcomes }
 
 console.log(JSON.stringify(report, null, 2))
-if (strict && (precision < 0.8 || recall < 0.6)) process.exitCode = 1
+if (strict && (precision < 0.8 || recall < 0.6 || !crossThreadRecall.passed)) process.exitCode = 1

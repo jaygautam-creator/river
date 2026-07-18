@@ -10,7 +10,7 @@ Most conversational AI starts from zero. River is designed around continuity wit
 
 - **Multiple conversation threads** for different moments and contexts.
 - **Memory proposals, not silent profiling**—a structured model extractor proposes at most one grounded storyline; users approve or reject every proposal, and failed/uncertain extraction saves nothing.
-- **Searchable continuity** across conversations and approved memories.
+- **Searchable continuity** across conversations and approved memories, with recall-aware retrieval that never silently falls back to a fabricated history.
 - **Real ownership controls**: edit, export, revoke memory consent, or delete the account.
 - **Privacy-ready foundations** including secure browser sessions, CSRF protection, MFA, and device-session controls.
 
@@ -71,7 +71,7 @@ EMAIL_FROM="River <hello@example.com>"
 - Server-side Groq chat integration for real companion responses, with Gemini and deterministic local fallbacks when no key is configured.
 - Persistent multi-conversation threads and search across conversations and approved memories.
 - User-controlled memory proposals, privacy preferences, and JSON data export.
-- Hands-free Groq voice mode: start once, speak naturally, River detects a pause, replies aloud, and resumes listening. Speaking while River is talking interrupts the response. Recordings are not stored by River.
+- Adaptive Groq voice mode: start once, River calibrates to ambient sound, waits for sustained speech and a natural pause, replies aloud, and resumes listening. It supports sustained-speech barge-in and a press-to-talk fallback for noisy environments. Recordings are not stored by River.
 - Health, readiness, and authenticated metrics endpoints plus CI build/audit checks.
 - Email verification, authenticator-app MFA, refresh-session device listing/revocation, temporary failed-login lockout, and transactional password-reset delivery interfaces.
 
@@ -84,13 +84,13 @@ GROQ_TRANSCRIPTION_MODEL=whisper-large-v3-turbo
 GROQ_SPEECH_MODEL=canopylabs/orpheus-v1-english
 ```
 
-Voice is hands-free after one start action: River detects a natural pause, transcribes the turn, replies in the active conversation thread, speaks the reply, and resumes listening. Speaking while River is talking interrupts the response. River does not persist the audio recording.
+Voice starts hands-free by default: River calibrates to ambient sound, detects sustained speech, waits longer after short or unfinished turns, transcribes the turn, replies in the active conversation thread, speaks the reply, and resumes listening. A sustained interruption stops River’s speech; press-to-talk is available when a room is noisy or browser speech awareness is unavailable. River does not persist the audio recording.
 
 Before the first spoken reply, open Groq's Orpheus English model in its playground and accept its one-time model terms. River shows a direct instruction if this has not been completed.
 
 ## Memory evaluation
 
-River includes a small, reproducible memory-quality harness. It sends four durable-storyline cases and four cases that should not become memories, then reports proposal precision, recall, and F1. It measures approval-gated proposals rather than the wording of a chat reply.
+River includes a small, reproducible memory-quality harness. It sends four durable-storyline cases and four cases that should not become memories, then reports proposal precision, recall, and F1. It also approves one proposed memory, opens a new thread, and checks whether River recalls the approved summary without relying on the old thread’s raw messages.
 
 ```bash
 npm run test:memory-eval
@@ -100,7 +100,7 @@ npm run test:memory-eval -- --strict
 
 Run it against a locally started River server when you are ready to benchmark; results depend on the configured model and should be recorded with the model name and date.
 
-For a production launch, replace local SQLite with managed encrypted storage and complete independent security, privacy, and model-safety reviews.
+For a production launch, use managed encrypted storage and complete independent security, privacy, and model-safety reviews. See [the production runbook](docs/PRODUCTION_RUNBOOK.md) for deployment, voice-quality, restore-drill, and incident-response gates.
 
 ## Project standards
 
