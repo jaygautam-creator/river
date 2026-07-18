@@ -231,14 +231,16 @@ function VoiceScreen({ onBack, onSend }) {
       conversationRef.current = true
       monitorRef.current = window.setInterval(() => {
         if (!conversationRef.current) return
-        const currentVolume = volume(); const now = Date.now(); const voiceDetected = currentVolume > 5.5
+        // Mobile and laptop microphones often report a quieter level than desktop
+        // mics.  A short, spoken turn such as "hello" must still become a turn.
+        const currentVolume = volume(); const now = Date.now(); const voiceDetected = currentVolume > 3.2
         if (voiceDetected) {
           if (!speechOnsetRef.current) speechOnsetRef.current = now
-          if (now - speechOnsetRef.current >= 280) { heardSpeechRef.current = true; lastSpeechRef.current = now }
+          if (now - speechOnsetRef.current >= 140) { heardSpeechRef.current = true; lastSpeechRef.current = now }
         } else speechOnsetRef.current = 0
-        const strongInterruption = currentVolume > 8 && speechOnsetRef.current && now - speechOnsetRef.current >= 450
+        const strongInterruption = currentVolume > 5.5 && speechOnsetRef.current && now - speechOnsetRef.current >= 320
         if (stateRef.current === 'speaking' && strongInterruption) { audioRef.current?.pause(); audioRef.current?.removeAttribute('src'); beginListening(); return }
-        if (stateRef.current === 'listening' && heardSpeechRef.current && now - turnStartedRef.current >= 900 && now - lastSpeechRef.current > 1450) recorderRef.current?.stop()
+        if (stateRef.current === 'listening' && heardSpeechRef.current && now - turnStartedRef.current >= 420 && now - lastSpeechRef.current > 720) recorderRef.current?.stop()
       }, 120)
       beginListening()
     } catch (error) { setVoiceState('error'); setMessage(error.message || 'Voice setup could not start. Check your microphone and try again.') }
