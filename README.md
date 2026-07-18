@@ -118,7 +118,7 @@ BASE_URL=https://your-river-domain.example LOAD_TEST_USERS=5 LOAD_TEST_REPORT=ar
 
 ## Real-time voice and launch boundaries
 
-The shipped voice experience is adaptive but turn-based. A truly conversational experience requires a regional WebSocket/WebRTC gateway, short-lived server-issued sessions, streaming transcription/model/TTS, and load-tested turn-taking. See [the real-time voice architecture](docs/REALTIME_VOICE_ARCHITECTURE.md); River returns an explicit `501` from its live-session availability endpoint until such a gateway is configured.
+River includes two voice paths. Its default fallback is adaptive, turn-based Groq voice. When `REALTIME_VOICE_GATEWAY_URL` is configured, River uses the independently deployed Cloudflare WebSocket gateway with short-lived server-issued sessions, streaming Gemini Live audio, interruption events, live transcripts, and approved-memory context. See [the real-time voice architecture](docs/REALTIME_VOICE_ARCHITECTURE.md). The live path still requires load, noisy-room, browser, and latency validation before it can be called production-ready.
 
 Draft launch documents are provided for legal review, not publication: [privacy policy](docs/PRIVACY_POLICY_DRAFT.md), [terms](docs/TERMS_OF_SERVICE_DRAFT.md), and [DPA](docs/DPA_DRAFT.md).
 

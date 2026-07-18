@@ -28,16 +28,23 @@ function allowedMessage(raw) {
     const message = JSON.parse(raw)
     // River creates the provider setup itself. A browser may submit only live
     // input/control messages, so it cannot override model, system policy, or tools.
-    return Boolean(message.realtimeInput || message.clientContent || message.toolResponse)
+    return Boolean(message.realtimeInput || message.toolResponse)
   } catch { return false }
 }
 
-function providerSetup() {
+function providerSetup(claims) {
+  const memory = Array.isArray(claims.memory_context) && claims.memory_context.length
+    ? `\n\nApproved River memory (use only when relevant; never invent beyond this):\n${claims.memory_context.map(item => `- ${item.topic}: ${item.summary}`).join('\n')}`
+    : ''
   return JSON.stringify({
     setup: {
       model: 'models/gemini-3.1-flash-live-preview',
-      generationConfig: { responseModalities: ['AUDIO'], temperature: 0.45 },
-      systemInstruction: { parts: [{ text: 'You are River, a warm, concise AI companion. Respect the user’s boundaries. Never claim memories you have not been given. If there is immediate danger, encourage emergency services and trusted human support.' }] }
+      responseModalities: ['AUDIO'],
+      inputAudioTranscription: {},
+      outputAudioTranscription: {},
+      thinkingConfig: { thinkingLevel: 'minimal' },
+      realtimeInputConfig: { automaticActivityDetection: { endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH', prefixPaddingMs: 180, silenceDurationMs: 700 } },
+      systemInstruction: { parts: [{ text: `You are River, a warm, concise AI companion for ${claims.name || 'the user'}. Respect the user’s boundaries. Never claim memories you have not been given. If there is immediate danger, encourage emergency services and trusted human support.${memory}` }] }
     }
   })
 }
@@ -63,7 +70,7 @@ export default {
 
     provider.addEventListener('open', () => {
       providerOpen = true
-      provider.send(providerSetup())
+      provider.send(providerSetup(claims))
       for (const message of queued.splice(0)) provider.send(message)
       browser.send(JSON.stringify({ type: 'session.ready', user_id: claims.id }))
     })
