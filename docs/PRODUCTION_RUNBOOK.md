@@ -17,6 +17,21 @@ This runbook describes the minimum operating standard for a public River deploym
 4. Run `npm run build`, `npm run test:smoke`, and `npm audit --audit-level=high` before release.
 5. Review Vercel deployment logs after every production deploy and roll back immediately if readiness fails.
 
+## Latency budgets and observability
+
+River emits one structured, content-free `http.request` log event per API request with a request ID, route, status, and duration. Use the Vercel log explorer or a managed log drain to alert on elevated 5xx responses and sustained latency. Do not add messages, memory summaries, audio, transcripts, access tokens, or provider keys to logs.
+
+Set an initial release budget, then measure it from production traffic before tightening it:
+
+| Interaction | Initial p95 target | Escalation threshold |
+| --- | ---: | ---: |
+| Thread creation / memory edit | 1.5 s | 3 s |
+| Conversation fetch | 1.5 s | 3 s |
+| Text reply, excluding model generation | 2 s | 4 s |
+| Voice turn to first audio | 2.5 s on a streaming gateway | 4 s |
+
+The existing Groq REST voice path is not a streaming gateway and is expected to exceed the voice target under normal network/provider conditions. Treat that as an architectural limitation, not a client rendering defect. Keep the application and database in compatible nearby regions before trying to optimize browser code; do not move regions or plans without cost/availability approval.
+
 ## Voice quality and operations
 
 River records only the active browser turn; it does not persist audio. The client records privacy-safe timing telemetry (`capture`, `transcription`, `reply`, `speech`, and final turn outcome) without audio or transcripts. The API stores only stage, duration, outcome, and user account reference in `voice_events`.
@@ -52,3 +67,5 @@ Treat a sustained increase in `reply` or `speech` duration as a provider/network
 - Published privacy policy, terms, consent records, and jurisdictional review.
 - Passkeys or WebAuthn, suspicious-login alerts, richer device controls.
 - Independent application security, privacy, and model-safety assessments.
+- A regional, long-lived live-voice gateway with short-lived sessions and load testing; see [real-time voice architecture](REALTIME_VOICE_ARCHITECTURE.md).
+- Published, counsel-reviewed legal documents. Repository drafts are available for review: [privacy policy](PRIVACY_POLICY_DRAFT.md), [terms](TERMS_OF_SERVICE_DRAFT.md), and [DPA](DPA_DRAFT.md).

@@ -57,6 +57,7 @@ app.set('trust proxy', 1)
 app.use(cors({ origin, credentials: true }))
 app.use(express.json({ limit: '32kb' }))
 app.use((req, res, next) => {
+  const startedAt = performance.now()
   req.requestId = String(req.headers['x-request-id'] || crypto.randomUUID()).slice(0, 120)
   res.setHeader('X-Request-ID', req.requestId)
   res.setHeader('X-Content-Type-Options', 'nosniff')
@@ -64,6 +65,13 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer')
   res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), microphone=(self)')
   if (isProduction) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+  res.on('finish', () => {
+    const duration = Math.round(performance.now() - startedAt)
+    // Structured, content-free telemetry is intentionally emitted to the host's
+    // logs rather than persisted to Postgres: observability must not make each
+    // user action slower or collect private conversation data.
+    console.info(JSON.stringify({ event: 'http.request', request_id: req.requestId, method: req.method, route: req.path, status: res.statusCode, duration_ms: duration }))
+  })
   next()
 })
 app.use((req, res, next) => configurationMissing ? res.status(503).json({ error: 'River production configuration is incomplete.' }) : next())
@@ -221,6 +229,13 @@ app.get('/api/storylines/:id/history', auth, async (req, res) => { const hit = (
 app.post('/api/chat', auth, async (req, res) => { try { const content = String(req.body?.content || '').trim(); if (!content) return res.status(400).json({ error: 'Message is empty.' }); const thread = await ensureThread(req.user.id, req.body?.thread_id); await q("INSERT INTO messages(user_id,thread_id,role,content) VALUES($1,$2,'user',$3)", [req.user.id, thread.id, content]); await q('UPDATE threads SET updated_at=NOW() WHERE id=$1', [thread.id]); const context = await relevantStories(req.user.id, content); const [candidate, text] = await Promise.all([req.user.memory_enabled ? extractMemory(content, context) : Promise.resolve(null), reply(content, context, req.user.name, Boolean(req.body?.voice))]); let proposal = null; if (candidate) proposal = (await q("INSERT INTO memory_proposals(user_id,topic,summary,source_quote,confidence,sensitivity) SELECT $1,$2,$3,$4,$5,$6 WHERE NOT EXISTS(SELECT 1 FROM memory_proposals WHERE user_id=$1 AND status='pending' AND (source_quote=$4 OR topic=$2)) RETURNING *", [req.user.id, candidate.topic, candidate.summary, content, candidate.confidence, candidate.sensitivity])).rows[0] || null; await q("INSERT INTO messages(user_id,thread_id,role,content) VALUES($1,$2,'assistant',$3)", [req.user.id, thread.id, text]); audit(req, 'chat.message', { content_length: content.length, voice: Boolean(req.body?.voice) }); res.json({ reply: text, provider: process.env.GROQ_API_KEY ? 'groq' : 'local-fallback', thread, proposal, proposals: await proposals(req.user.id), storylines: await stories(req.user.id), context }) } catch (error) { console.error(error); res.status(502).json({ error: 'River could not create a reply. Please try again.' }) } })
 
 app.get('/api/voice/session', auth, (req, res) => res.json({ enabled: Boolean(process.env.GROQ_API_KEY), provider: process.env.GROQ_API_KEY ? 'groq' : null, transcription_model: process.env.GROQ_TRANSCRIPTION_MODEL || 'whisper-large-v3-turbo', speech_model: process.env.GROQ_SPEECH_MODEL || 'canopylabs/orpheus-v1-english', message: process.env.GROQ_API_KEY ? 'Groq voice is ready.' : 'Voice is not configured.' }))
+app.get('/api/voice/live/session', auth, (req, res) => {
+  // A Vercel request handler is intentionally not presented as a WebSocket relay.
+  // Live audio must run through a separately deployed, regional gateway that can
+  // issue short-lived sessions and keep provider credentials off the browser.
+  if (!process.env.REALTIME_VOICE_GATEWAY_URL) return res.status(501).json({ enabled: false, error: 'Live voice is not configured. River is using its adaptive turn-based voice mode.' })
+  res.json({ enabled: true, gateway_url: process.env.REALTIME_VOICE_GATEWAY_URL, expires_in_seconds: 60, message: 'Request a short-lived live session from the configured voice gateway.' })
+})
 app.post('/api/voice/transcribe', auth, express.raw({ type: 'audio/*', limit: '25mb' }), async (req, res) => { if (!process.env.GROQ_API_KEY) return res.status(503).json({ error: 'Groq voice is not configured.' }); if (!Buffer.isBuffer(req.body) || req.body.length < 32) return res.status(400).json({ error: 'A short audio recording is required.' }); try { const form = new FormData(); form.append('file', new Blob([req.body], { type: req.headers['content-type'] || 'audio/webm' }), 'river.webm'); form.append('model', process.env.GROQ_TRANSCRIPTION_MODEL || 'whisper-large-v3-turbo'); const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` }, body: form, signal: AbortSignal.timeout(35_000) }); if (!response.ok) throw new Error('transcription failed'); const transcript = String((await response.json()).text || '').trim(); transcript ? res.json({ transcript }) : res.status(422).json({ error: 'River could not hear any speech.' }) } catch { res.status(502).json({ error: 'River could not transcribe this recording.' }) } })
 app.post('/api/voice/speak', auth, async (req, res) => { if (!process.env.GROQ_API_KEY) return res.status(503).json({ error: 'Groq voice is not configured.' }); const input = String(req.body?.text || '').trim().slice(0, 200); if (!input) return res.status(400).json({ error: 'Text is required.' }); try { const response = await fetch('https://api.groq.com/openai/v1/audio/speech', { method: 'POST', headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(35_000), body: JSON.stringify({ model: process.env.GROQ_SPEECH_MODEL || 'canopylabs/orpheus-v1-english', voice: 'hannah', input, response_format: 'wav' }) }); if (!response.ok) return res.status(response.status === 400 ? 412 : 502).json({ error: 'River could not create speech. Confirm Groq Orpheus terms are accepted.' }); res.setHeader('Content-Type', 'audio/wav'); res.send(Buffer.from(await response.arrayBuffer())) } catch { res.status(502).json({ error: 'River could not create speech.' }) } })
 

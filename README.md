@@ -98,7 +98,22 @@ npm run test:memory-eval
 npm run test:memory-eval -- --strict
 ```
 
-Run it against a locally started River server when you are ready to benchmark; results depend on the configured model and should be recorded with the model name and date.
+Run it against a locally started River server when you are ready to benchmark. Against a rate-limited provider, retain the report and add a pause between model calls so the result is evidence rather than a quota failure:
+
+```bash
+BASE_URL=https://your-river-domain.example \
+MEMORY_EVAL_DELAY_MS=13000 \
+MEMORY_EVAL_REPORT=artifacts/memory-eval.json \
+npm run test:memory-eval -- --strict
+```
+
+The report records outcomes, strict-gate status, request latency percentiles, configured delay, timestamp, and any execution failure. Do not publish a precision/recall score until a completed report is retained with the model name and date.
+
+## Real-time voice and launch boundaries
+
+The shipped voice experience is adaptive but turn-based. A truly conversational experience requires a regional WebSocket/WebRTC gateway, short-lived server-issued sessions, streaming transcription/model/TTS, and load-tested turn-taking. See [the real-time voice architecture](docs/REALTIME_VOICE_ARCHITECTURE.md); River returns an explicit `501` from its live-session availability endpoint until such a gateway is configured.
+
+Draft launch documents are provided for legal review, not publication: [privacy policy](docs/PRIVACY_POLICY_DRAFT.md), [terms](docs/TERMS_OF_SERVICE_DRAFT.md), and [DPA](docs/DPA_DRAFT.md).
 
 For a production launch, use managed encrypted storage and complete independent security, privacy, and model-safety reviews. See [the production runbook](docs/PRODUCTION_RUNBOOK.md) for deployment, voice-quality, restore-drill, and incident-response gates.
 
