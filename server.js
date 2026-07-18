@@ -11,7 +11,9 @@ import 'dotenv/config'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = process.env.PORT || 8787
-const JWT_SECRET = process.env.JWT_SECRET || 'kindred-local-demo-secret'
+// Never use a source-controlled signing key. Production still requires an
+// explicit JWT_SECRET below; local development gets a fresh key per process.
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('base64url')
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5'
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3-flash-preview'
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'
