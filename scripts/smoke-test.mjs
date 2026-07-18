@@ -56,6 +56,7 @@ const deniedMfaLogin = await fetch(`${base}/api/auth/login`, { method: 'POST', h
 if (deniedMfaLogin.status !== 401) throw new Error('MFA was not required on login')
 const allowedMfaLogin = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password: 'smoke-password-123', otp }) })
 if (!allowedMfaLogin.ok) throw new Error(`MFA login failed: ${allowedMfaLogin.status}`)
+const renewedMfaSession = await allowedMfaLogin.json()
 const lockoutEmail = `lockout-${Date.now()}@river.local`
 const lockoutSignup = await fetch(`${base}/api/auth/signup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Lockout smoke', email: lockoutEmail, password: 'lockout-password-123' }) })
 if (!lockoutSignup.ok) throw new Error(`Lockout signup failed: ${lockoutSignup.status}`)
@@ -81,7 +82,9 @@ if (health.provider === 'groq') {
 }
 const exported = await fetch(`${base}/api/privacy/export`, { headers: authHeaders })
 if (!exported.ok) throw new Error(`Privacy export failed: ${exported.status}`)
-const refreshed = await fetch(`${base}/api/auth/refresh`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ refresh_token: session.refresh_token }) })
+// MFA enablement deliberately invalidates the original refresh token. Verify rotation with
+// the fresh token received after a successful MFA login instead.
+const refreshed = await fetch(`${base}/api/auth/refresh`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ refresh_token: renewedMfaSession.refresh_token }) })
 if (!refreshed.ok) throw new Error(`Refresh failed: ${refreshed.status}`)
 const chat = await fetch(`${base}/api/chat`, { method: 'POST', headers: { ...authHeaders, 'content-type': 'application/json' }, body: JSON.stringify({ thread_id: threadData.thread.id, content: 'I am thinking about planning a two-week Lisbon trip for late summer with a tiny notebook.' }) })
 if (!chat.ok) throw new Error(`Chat failed: ${chat.status}`)
