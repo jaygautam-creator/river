@@ -8,7 +8,7 @@ import pg from 'pg'
 const app = express()
 const origin = process.env.APP_ORIGIN
 const secret = process.env.JWT_SECRET
-if (!process.env.DATABASE_URL || !secret) throw new Error('DATABASE_URL and JWT_SECRET are required.')
+const configurationMissing = !process.env.DATABASE_URL || !secret
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false }, max: 2 })
 const q = (text, values = []) => pool.query(text, values)
 const now = () => new Date().toISOString()
@@ -32,6 +32,7 @@ app.disable('x-powered-by')
 app.set('trust proxy', 1)
 app.use(cors({ origin, credentials: true }))
 app.use(express.json({ limit: '32kb' }))
+app.use((req, res, next) => configurationMissing ? res.status(503).json({ error: 'River production configuration is incomplete.' }) : next())
 app.use(async (req, res, next) => { try { await ensureSchema(); next() } catch (error) { console.error(error); res.status(503).json({ error: 'River database is not ready yet.' }) } })
 app.use((req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('X-Frame-Options', 'DENY'); next() })
 
