@@ -62,7 +62,9 @@ function Auth({ onAuth }) {
         window.history.replaceState({}, '', window.location.pathname); setMode('login'); setPassword(''); setConfirmPassword(''); setNotice('Your password was reset. You can sign in now.'); return
       }
       const data = await api(`/api/auth/${mode}`, { method: 'POST', body: JSON.stringify({ name, email, password, otp }) })
-      localStorage.removeItem('kindred_token'); onAuth(data.user)
+      if (data.token) localStorage.setItem('kindred_token', data.token)
+      else localStorage.removeItem('kindred_token')
+      onAuth(data.user)
     } catch (err) { setError(err.message) } finally { setBusy(false) }
   }
   return <main className="auth-page">
@@ -115,7 +117,7 @@ function PrivacyPanel({ user, enabled, retentionDays, onToggle, onRetentionChang
   const loadSessions = async () => { try { setSessions((await api('/api/auth/sessions')).sessions.filter(session => !session.revoked_at)) } catch {} }
   useEffect(() => { loadSessions() }, [])
   const setupMfa = async () => { setBusy(true); try { setMfaSetup(await api('/api/auth/mfa/setup', { method: 'POST', body: '{}' })); setNotice('Add this secret to an authenticator app, then enter the six-digit code.') } catch (err) { setNotice(err.message) } finally { setBusy(false) } }
-  const enableMfa = async () => { setBusy(true); try { await api('/api/auth/mfa/enable', { method: 'POST', body: JSON.stringify({ otp }) }); setMfaSetup(null); setOtp(''); setNotice('Authenticator protection is now enabled.') } catch (err) { setNotice(err.message) } finally { setBusy(false) } }
+  const enableMfa = async () => { setBusy(true); try { const data = await api('/api/auth/mfa/enable', { method: 'POST', body: JSON.stringify({ otp }) }); if (data.token) localStorage.setItem('kindred_token', data.token); setMfaSetup(null); setOtp(''); setNotice('Authenticator protection is now enabled.') } catch (err) { setNotice(err.message) } finally { setBusy(false) } }
   const revokeSession = async id => { try { await api(`/api/auth/sessions/${id}`, { method: 'DELETE', body: '{}' }); await loadSessions(); setNotice('Session revoked.') } catch (err) { setNotice(err.message) } }
   const deleteAccount = async () => { if (!password || !window.confirm('Permanently delete your River account and all of its data? This cannot be undone.')) return; setBusy(true); try { await api('/api/privacy/account', { method: 'DELETE', body: JSON.stringify({ password }) }); onAccountDeleted() } catch (err) { setNotice(err.message) } finally { setBusy(false) } }
   const resendVerification = async () => { setBusy(true); try { const result = await api('/api/auth/email-verification/request', { method: 'POST', body: '{}' }); setNotice(result.message) } catch (err) { setNotice(err.message) } finally { setBusy(false) } }
