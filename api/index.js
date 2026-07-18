@@ -77,6 +77,13 @@ app.use((req, res, next) => {
   if (!cookieSession || exempt.includes(req.path)) return next()
   const cookieToken = readCookie(req, 'river_csrf') || ''
   const headerToken = String(req.headers['x-csrf-token'] || '')
+  // Older River sessions have the secure access cookie but predate the CSRF
+  // cookie. A request with an exact same-origin Origin header is safe to heal
+  // in place, so the first voice or memory action does not fail.
+  if (!cookieToken && String(req.headers.origin || '').replace(/\/$/, '') === origin.replace(/\/$/, '')) {
+    res.cookie('river_csrf', crypto.randomBytes(32).toString('base64url'), cookieOptions(false))
+    return next()
+  }
   if (!cookieToken || cookieToken.length !== headerToken.length || !crypto.timingSafeEqual(Buffer.from(cookieToken), Buffer.from(headerToken))) return res.status(403).json({ error: 'Your session could not be verified. Refresh and try again.' })
   next()
 })
