@@ -9,6 +9,7 @@
     "build": "vite build",
     "test:smoke": "node scripts/smoke-test.mjs",
     "test:memory-eval": "node scripts/memory-eval.mjs",
+    "db:migrate": "node scripts/migrate-postgres.mjs",
     "backup": "node scripts/backup.mjs",
     "restore": "node scripts/restore-backup.mjs",
     "start": "node server.js"
@@ -22,6 +23,7 @@
     "jsonwebtoken": "^9.0.2",
     "lucide-react": "^0.468.0",
     "otpauth": "^9.5.1",
+    "pg": "^8.22.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
