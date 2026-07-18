@@ -50,7 +50,7 @@ function Auth({ onAuth }) {
     api('/api/auth/email-verification/complete', { method: 'POST', body: JSON.stringify({ token }) })
       .then(() => { window.history.replaceState({}, '', window.location.pathname); setMode('login'); setNotice('Your email is verified. You can sign in now.') })
       .catch(err => setError(err.message))
-  }, [])
+  }, [privacyOpen])
   const submit = async e => {
     e.preventDefault(); setBusy(true); setError(''); setNotice('')
     try {
@@ -319,6 +319,10 @@ function App({ user, onLogout }) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [error, setError] = useState('')
   const chatRef = useRef(null)
+  useEffect(() => {
+    document.querySelector('.account-row .icon-button.subtle')?.setAttribute('aria-label', 'Sign out')
+    document.querySelector('select.settings-input')?.setAttribute('aria-label', 'Conversation retention')
+  }, [])
   const loadThread = async id => {
     const data = await api(`/api/conversation?thread_id=${id}`)
     setActiveThreadId(id); setMessages(data.messages); setStorylines(data.storylines); setProposals(data.proposals || []); setError('')
