@@ -68,6 +68,10 @@ app.use((req, res, next) => configurationMissing ? res.status(503).json({ error:
 app.use(async (req, res, next) => { try { await ensureSchema(); next() } catch (error) { console.error(error); res.status(503).json({ error: 'River database is not ready yet.' }) } })
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api') || ['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next()
+  // A bearer token is explicitly attached by the River client and cannot be
+  // supplied by a cross-site form. CSRF protection is required only for the
+  // cookie-authenticated path. This also lets pre-upgrade sessions recover.
+  if (String(req.headers.authorization || '').startsWith('Bearer ')) return next()
   const cookieSession = readCookie(req, 'river_access') || readCookie(req, 'river_refresh')
   const exempt = ['/api/auth/signup', '/api/auth/login', '/api/auth/refresh', '/api/auth/password-reset/request', '/api/auth/password-reset/complete', '/api/auth/email-verification/complete']
   if (!cookieSession || exempt.includes(req.path)) return next()
