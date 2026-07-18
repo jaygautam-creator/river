@@ -6,8 +6,7 @@ import './styles.css'
 const api = async (path, options = {}) => {
   const method = String(options.method || 'GET').toUpperCase()
   const csrf = document.cookie.split('; ').find(value => value.startsWith('river_csrf='))?.split('=')[1]
-  const token = localStorage.getItem('kindred_token')
-  const response = await fetch(path, { ...options, credentials: 'include', headers: { 'Content-Type': 'application/json', ...(csrf && !['GET', 'HEAD', 'OPTIONS'].includes(method) ? { 'X-CSRF-Token': csrf } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.headers || {}) } })
+  const response = await fetch(path, { ...options, credentials: 'include', headers: { 'Content-Type': 'application/json', ...(csrf && !['GET', 'HEAD', 'OPTIONS'].includes(method) ? { 'X-CSRF-Token': csrf } : {}), ...(options.headers || {}) } })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(data.error || 'Something went wrong.')
   return data
@@ -15,8 +14,7 @@ const api = async (path, options = {}) => {
 
 const apiAudio = async (path, blob) => {
   const csrf = document.cookie.split('; ').find(value => value.startsWith('river_csrf='))?.split('=')[1]
-  const token = localStorage.getItem('kindred_token')
-  const response = await fetch(path, { method: 'POST', credentials: 'include', body: blob, headers: { 'Content-Type': blob.type || 'audio/webm', ...(csrf ? { 'X-CSRF-Token': csrf } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) } })
+  const response = await fetch(path, { method: 'POST', credentials: 'include', body: blob, headers: { 'Content-Type': blob.type || 'audio/webm', ...(csrf ? { 'X-CSRF-Token': csrf } : {}) } })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(data.error || 'Voice request failed.')
   return data
@@ -62,8 +60,6 @@ function Auth({ onAuth }) {
         window.history.replaceState({}, '', window.location.pathname); setMode('login'); setPassword(''); setConfirmPassword(''); setNotice('Your password was reset. You can sign in now.'); return
       }
       const data = await api(`/api/auth/${mode}`, { method: 'POST', body: JSON.stringify({ name, email, password, otp }) })
-      if (data.token) localStorage.setItem('kindred_token', data.token)
-      else localStorage.removeItem('kindred_token')
       onAuth(data.user)
     } catch (err) { setError(err.message) } finally { setBusy(false) }
   }
@@ -117,7 +113,7 @@ function PrivacyPanel({ user, enabled, retentionDays, onToggle, onRetentionChang
   const loadSessions = async () => { try { setSessions((await api('/api/auth/sessions')).sessions.filter(session => !session.revoked_at)) } catch {} }
   useEffect(() => { loadSessions() }, [])
   const setupMfa = async () => { setBusy(true); try { setMfaSetup(await api('/api/auth/mfa/setup', { method: 'POST', body: '{}' })); setNotice('Add this secret to an authenticator app, then enter the six-digit code.') } catch (err) { setNotice(err.message) } finally { setBusy(false) } }
-  const enableMfa = async () => { setBusy(true); try { const data = await api('/api/auth/mfa/enable', { method: 'POST', body: JSON.stringify({ otp }) }); if (data.token) localStorage.setItem('kindred_token', data.token); setMfaSetup(null); setOtp(''); setNotice('Authenticator protection is now enabled.') } catch (err) { setNotice(err.message) } finally { setBusy(false) } }
+  const enableMfa = async () => { setBusy(true); try { await api('/api/auth/mfa/enable', { method: 'POST', body: JSON.stringify({ otp }) }); setMfaSetup(null); setOtp(''); setNotice('Authenticator protection is now enabled.') } catch (err) { setNotice(err.message) } finally { setBusy(false) } }
   const revokeSession = async id => { try { await api(`/api/auth/sessions/${id}`, { method: 'DELETE', body: '{}' }); await loadSessions(); setNotice('Session revoked.') } catch (err) { setNotice(err.message) } }
   const deleteAccount = async () => { if (!password || !window.confirm('Permanently delete your River account and all of its data? This cannot be undone.')) return; setBusy(true); try { await api('/api/privacy/account', { method: 'DELETE', body: JSON.stringify({ password }) }); onAccountDeleted() } catch (err) { setNotice(err.message) } finally { setBusy(false) } }
   const resendVerification = async () => { setBusy(true); try { const result = await api('/api/auth/email-verification/request', { method: 'POST', body: '{}' }); setNotice(result.message) } catch (err) { setNotice(err.message) } finally { setBusy(false) } }
@@ -366,8 +362,8 @@ function App({ user, onLogout }) {
 function Root() {
   const [user, setUser] = useState(null)
   const [checking, setChecking] = useState(true)
-  useEffect(() => { api('/api/auth/me').then(d => setUser(d.user)).catch(() => localStorage.removeItem('kindred_token')).finally(() => setChecking(false)) }, [])
-  const logout = async () => { try { await api('/api/auth/logout', { method: 'POST', body: '{}' }) } catch {} finally { localStorage.removeItem('kindred_token'); setUser(null) } }
+  useEffect(() => { api('/api/auth/me').then(d => setUser(d.user)).catch(() => {}).finally(() => setChecking(false)) }, [])
+  const logout = async () => { try { await api('/api/auth/logout', { method: 'POST', body: '{}' }) } catch {} finally { setUser(null) } }
   if (checking) return <div className="loading-screen"><div className="brand-mark"><Sparkles size={18} /></div><Loader2 className="spin" size={18} /></div>
   return user ? <App user={user} onLogout={logout} /> : <Auth onAuth={setUser} />
 }

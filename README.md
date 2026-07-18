@@ -36,6 +36,7 @@ For the Build Week submission checklist and personal-description outline, see [H
 ```bash
 npm run test:smoke
 npm run test:memory-eval
+npm run test:load
 npm run build
 npm audit --audit-level=high
 ```
@@ -108,6 +109,12 @@ npm run test:memory-eval -- --strict
 ```
 
 The report records outcomes, strict-gate status, request latency percentiles, configured delay, timestamp, and any execution failure. Do not publish a precision/recall score until a completed report is retained with the model name and date.
+
+The authenticated API load smoke test writes an evidence report without spending model/voice credits:
+
+```bash
+BASE_URL=https://your-river-domain.example LOAD_TEST_USERS=5 LOAD_TEST_REPORT=artifacts/load-test.json npm run test:load
+```
 
 ## Real-time voice and launch boundaries
 

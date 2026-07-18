@@ -1,0 +1,8 @@
+name = "river-realtime-gateway"
+main = "src/index.js"
+compatibility_date = "2026-07-18"
+
+# Set secrets with Wrangler; never commit them:
+# wrangler secret put GEMINI_API_KEY
+# wrangler secret put RIVER_JWT_SECRET
+# wrangler secret put ALLOWED_ORIGIN

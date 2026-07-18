@@ -53,6 +53,29 @@ Treat a sustained increase in `reply` or `speech` duration as a provider/network
 - Rehearse rollback with a Vercel deployment rollback and record the timestamp, owner, and outcome.
 - Keep Row Level Security enabled for any Supabase tables exposed directly to a client. River’s current application data path is server-side Postgres, not direct browser table access.
 
+## Restore drill record
+
+Run a restore drill at least quarterly and after any material migration. The local encrypted-backup scripts support a verifiable drill for SQLite deployments; the Supabase deployment must use a separate staging project or restore environment.
+
+1. Record the source backup/snapshot ID, operator, target environment, and start time.
+2. Restore only into an isolated environment—never the active production database.
+3. Run `npm run test:smoke` and a retained `npm run test:memory-eval -- --strict` report against that environment.
+4. Verify sign-in, approved-memory recall, deletion, and retention behavior manually.
+5. Record recovery time, recovery point, failures, and follow-up owner. Destroy the restore environment when complete.
+
+## Load and release testing
+
+The repository includes a low-cost authenticated API load smoke test. It does not invoke models, create raw-audio traffic, or represent a full capacity certification.
+
+```bash
+BASE_URL=https://your-river-domain.example \
+LOAD_TEST_USERS=5 \
+LOAD_TEST_REPORT=artifacts/load-test.json \
+npm run test:load
+```
+
+Retain the JSON report with the Vercel deployment ID. Increase concurrency only after confirming account-creation limits and provider costs. Full load/soak testing, regional failover, monitoring alerts, and an independent review remain formal release gates.
+
 ## Incident response
 
 1. Disable provider keys or Vercel traffic if a credential leak or unsafe behavior is suspected.

@@ -41,4 +41,4 @@ The gateway must be a long-lived regional service, separate from the Vercel requ
 - Apply origin checks, per-user and per-IP rate limits, message-size limits, reconnect backoff, and abuse monitoring.
 - Run load/soak tests with interrupted turns, muted tabs, denied microphone permission, poor networks, and noisy rooms before release.
 
-`GET /api/voice/live/session` is an availability contract only. It returns `501` until `REALTIME_VOICE_GATEWAY_URL` points to an independently deployed gateway; this prevents River from falsely advertising streaming voice before it exists.
+`GET /api/voice/live/session` returns `501` until `REALTIME_VOICE_GATEWAY_URL` points to an independently deployed gateway. Once configured it issues a purpose-limited 60-second gateway token—not the normal River session cookie—so the browser can establish one live connection without receiving a long-lived credential.
