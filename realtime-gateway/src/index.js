@@ -47,7 +47,6 @@ function providerSetup(claims) {
       responseModalities: ['AUDIO'],
       inputAudioTranscription: {},
       outputAudioTranscription: {},
-      thinkingConfig: { thinkingLevel: 'minimal' },
       realtimeInputConfig: { automaticActivityDetection: { endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH', prefixPaddingMs: 180, silenceDurationMs: 700 } },
       systemInstruction: { parts: [{ text: `You are River, a warm, concise AI companion for ${claims.name || 'the user'}. Respect the user’s boundaries. Never claim memories you have not been given. If there is immediate danger, encourage emergency services and trusted human support.${memory}` }] }
     }
@@ -105,7 +104,15 @@ export default {
       browser.send(event.data)
     })
     provider.addEventListener('error', () => { browser.send(JSON.stringify({ type: 'error', code: 'provider_unavailable', message: 'The live voice provider could not be reached.' })); close(browser, 1011, 'Provider unavailable') })
-    provider.addEventListener('close', event => { if (!setupReady) browser.send(JSON.stringify({ type: 'error', code: 'provider_closed', message: 'The live voice provider closed before the session was ready.' })); close(browser, 1000, 'Provider session closed') })
+    provider.addEventListener('close', event => {
+      if (!setupReady) {
+        // Do not expose credentials or provider payloads. The close code is
+        // enough to distinguish an unavailable service from a rejected setup
+        // in client-side diagnostics and Workers logs.
+        browser.send(JSON.stringify({ type: 'error', code: 'provider_closed', message: `The live voice provider closed before the session was ready (code ${event.code || 'unknown'}).` }))
+      }
+      close(browser, 1000, 'Provider session closed')
+    })
     browser.addEventListener('message', event => {
       if (!withinMessageRate() || !allowedMessage(event.data)) return close(browser, 1008, 'Unsupported or excessive live message')
       sendProvider(event.data)
