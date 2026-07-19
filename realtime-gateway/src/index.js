@@ -22,6 +22,16 @@ async function verifyRiverJwt(token, secret) {
 
 const close = (socket, code, reason) => { try { socket.close(code, reason) } catch {} }
 
+async function liveModelAvailable(env, model) {
+  if (!env.GEMINI_API_KEY) return false
+  try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}?key=${encodeURIComponent(env.GEMINI_API_KEY)}`)
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
 function allowedMessage(raw) {
   if (typeof raw !== 'string' || raw.length > 1_500_000) return false
   try {
@@ -56,7 +66,13 @@ function providerSetup(claims, model) {
 
 export default {
   async fetch(request, env) {
-    if (request.method === 'GET' && new URL(request.url).pathname === '/health') return json({ ok: true, service: 'river-realtime-gateway' })
+    if (request.method === 'GET' && new URL(request.url).pathname === '/health') {
+      const [primaryLiveModel, fallbackLiveModel] = await Promise.all([
+        liveModelAvailable(env, 'gemini-3.1-flash-live-preview'),
+        liveModelAvailable(env, 'gemini-2.5-flash-native-audio-preview-12-2025')
+      ])
+      return json({ ok: primaryLiveModel || fallbackLiveModel, service: 'river-realtime-gateway', live_models: { primary: primaryLiveModel, fallback: fallbackLiveModel } }, primaryLiveModel || fallbackLiveModel ? 200 : 503)
+    }
     if (new URL(request.url).pathname !== '/live') return json({ error: 'Not found.' }, 404)
     if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') return json({ error: 'Expected a WebSocket upgrade.' }, 426)
     if (env.ALLOWED_ORIGIN && request.headers.get('Origin') !== env.ALLOWED_ORIGIN) return json({ error: 'Origin is not allowed.' }, 403)
