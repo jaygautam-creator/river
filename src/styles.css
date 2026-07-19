@@ -9,7 +9,7 @@ body:has(.app-shell){overflow:hidden;}
 .app-shell{height:100dvh;min-height:0;grid-template-columns:230px minmax(0,1fr) 340px;overscroll-behavior:none;}
 .sidebar,.main-column,.memory-panel,.chat-area{min-height:0;}
 .main-column{overflow:hidden;}
-.chat-area{overscroll-behavior:contain;scroll-behavior:smooth;scrollbar-gutter:stable;}
+.chat-area{overscroll-behavior:contain;scrollbar-gutter:stable;scroll-padding-block:24px;}
 .message-list{padding-bottom:52px;}
 .composer-wrap{flex:0 0 auto;padding-bottom:max(22px,env(safe-area-inset-bottom));}
 .composer textarea{line-height:1.45;overflow-y:auto;min-height:20px;}
@@ -89,3 +89,50 @@ body:has(.app-shell){overflow:hidden;}
 .nav-label,.thread-row small,.account-copy small,.prompt-grid small,.message-meta,.message-time,.composer-hint{font-weight:500}
 button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:3px solid #315d45;outline-offset:3px}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.01ms!important}}
+
+/* Interaction quality pass: each column owns its scroll area, controls keep a
+   stable size, and motion is limited to immediate feedback instead of layout. */
+html{background:var(--paper);}
+body{overscroll-behavior:none;-webkit-font-smoothing:antialiased;}
+button,input,textarea{-webkit-tap-highlight-color:transparent;}
+.app-shell{isolation:isolate;}
+.sidebar{min-height:0;overscroll-behavior:contain;}
+.sidebar-thread{min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;}
+.chat-area,.memory-panel,.sidebar-thread{scrollbar-width:thin;scrollbar-color:#b7c5b7 transparent;}
+.chat-area::-webkit-scrollbar,.memory-panel::-webkit-scrollbar,.sidebar-thread::-webkit-scrollbar{width:10px;height:10px;}
+.chat-area::-webkit-scrollbar-thumb,.memory-panel::-webkit-scrollbar-thumb,.sidebar-thread::-webkit-scrollbar-thumb{background:#bdc9bd;border:3px solid transparent;background-clip:padding-box;border-radius:999px;}
+.chat-area::-webkit-scrollbar-track,.memory-panel::-webkit-scrollbar-track,.sidebar-thread::-webkit-scrollbar-track{background:transparent;}
+.message-list{padding-top:30px;scroll-margin-block-end:24px;}
+.message{content-visibility:auto;contain-intrinsic-size:auto 124px;}
+.new-thread,.memory-toggle,.icon-button,.nav-item,.thread-select,.thread-actions button,.send-button,.ghost-button,.save-button,.mode-switch button,.voice-mode-control button{transition:background-color .15s ease,color .15s ease,border-color .15s ease,box-shadow .15s ease,transform .15s ease;}
+.new-thread:hover,.save-button:hover,.send-button:not(:disabled):hover{background:#385f4b;box-shadow:0 6px 14px #30523f24;}
+.new-thread:active,.save-button:active,.send-button:not(:disabled):active,.ghost-button:active,.memory-toggle:active,.icon-button:active{transform:translateY(1px);}
+.icon-button,.card-menu,.thread-actions button,.storyline-foot button,.text-action{min-width:36px;min-height:36px;}
+.memory-toggle{min-height:36px;}
+.thread-select{min-height:44px;}
+.thread-actions button{min-width:36px;min-height:36px;}
+.composer{transition:border-color .15s ease,box-shadow .15s ease;}
+.composer:focus-within{border-color:#8ca88f;box-shadow:0 0 0 3px #8eaa9926,0 6px 18px #59645c12;}
+.connection-notice{max-height:68px;overflow:auto;}
+.memory-panel{padding-bottom:max(27px,env(safe-area-inset-bottom));}
+@media(max-width:800px){
+  .topbar{padding-left:max(14px,env(safe-area-inset-left));padding-right:max(14px,env(safe-area-inset-right));}
+  .chat-area{overscroll-behavior-y:contain;}
+  .message-list{padding:22px 15px 30px;}
+  .message-body{font-size:15px;line-height:1.62;}
+  .user-message .message-body{max-width:95%;}
+  .memory-backdrop{backdrop-filter:blur(2px);}
+  .memory-panel{width:min(390px,94vw);}
+  .voice-screen{padding:68px 18px 24px;overflow:auto;align-items:start;}
+  .voice-screen-inner{margin:auto 0;}
+  .voice-breathe{width:164px;height:164px;margin-bottom:20px;}
+  .ring-b{width:154px;height:154px;}
+  .voice-screen h2{font-size:35px;}
+}
+@media(max-width:440px){
+  .top-actions{gap:3px;}
+  .memory-toggle{min-width:36px;padding:0 8px;justify-content:center;}
+  .memory-number{min-width:17px;text-align:center;}
+  .composer-wrap{padding-left:10px;padding-right:10px;}
+  .message-list{padding-left:12px;padding-right:12px;}
+}

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">River</title>
+  <desc id="desc">A flowing river line and spark, representing a continuous companion.</desc>
+  <rect width="64" height="64" rx="18" fill="#496f5b"/>
+  <path d="M15 39c7-11 12 8 20-3 5-7 8-8 14-7" fill="none" stroke="#f8f7f1" stroke-linecap="round" stroke-width="5"/>
+  <path d="M46 14v10M41 19h10M43 16l6 6M49 16l-6 6" fill="none" stroke="#f6cdb8" stroke-linecap="round" stroke-width="2.5"/>
+</svg>
