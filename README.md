@@ -4,21 +4,31 @@
 
 River is built for the thoughts, plans, and personal projects that do not fit into a single chat. It carries forward only the storylines a person explicitly approves, so every memory stays visible, editable, and reversible.
 
+**[Try the demo](https://river-sigma-three.vercel.app/)** · [How to run it](#quick-start) · [Voice notes](#voice-setup) · [Memory evaluation](#memory-evaluation)
+
+> **Current status:** River is a public beta. Text chat, account-scoped threads, consent-aware memory, and press-to-talk voice are available. Live streaming voice and production operations are still being validated.
+
+## How River works
+
+1. **Talk in any thread.** Keep work, relationships, ideas, and everyday life in their own conversations.
+2. **River notices possible continuity.** Clear, non-sensitive details can be saved automatically; sensitive or uncertain details stay as a proposal.
+3. **You stay in charge.** Review, edit, approve, revoke, export, or delete memories whenever you want.
+
 ## Why River
 
-Most conversational AI starts from zero. River is designed around continuity with consent:
+Most conversational AI starts from zero. River is designed around continuity without taking ownership away from the person using it:
 
 - **Multiple conversation threads** for different moments and contexts.
 - **Consentful, useful memory**—River automatically saves clear, non-sensitive, high-confidence details that help it understand someone over time (such as enduring preferences, hobbies, plans, and projects). Sensitive or uncertain details always remain proposals for the person to review, edit, approve, or reject.
 - **Searchable continuity** across conversations and approved memories, with recall-aware retrieval that never silently falls back to a fabricated history.
 - **Real ownership controls**: edit, export, revoke memory consent, or delete the account.
-- **Privacy-ready foundations** including secure browser sessions, CSRF protection, MFA, and device-session controls.
+- **Account and privacy controls** including secure browser sessions, CSRF protection, MFA, and device-session controls.
 
-## Hackathon quick start
+## Quick start
 
 River works locally without a paid service. For real, model-generated conversation, add a Groq API key to the ignored `.env` file; without it River uses the built-in local reply fallback.
 
-The default is Groq's `llama-3.3-70b-versatile`. Gemini remains available as a secondary provider. If a provider reports quota or credit exhaustion, River deliberately keeps the conversation usable with its local fallback instead of claiming a model response.
+The default chat model is Groq's `llama-3.3-70b-versatile`. Gemini is the preferred speech provider when `GEMINI_API_KEY` is configured; Groq handles transcription and remains the speech fallback. If a provider reports quota or credit exhaustion, River keeps the conversation usable with its local fallback instead of pretending a model response was generated.
 
 ```bash
 npm install
@@ -41,7 +51,7 @@ npm run build
 npm audit --audit-level=high
 ```
 
-## Container deployment
+## Engineering deployment notes
 
 Build and run the production container with a persistent volume for the SQLite database:
 
