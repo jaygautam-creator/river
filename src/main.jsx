@@ -268,7 +268,23 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
     socket.onmessage = event => {
       let payload; try { payload = JSON.parse(event.data) } catch { return }
       if (payload.type === 'session.ready') { clearLiveReadyTimer(); startCapture(); return }
-      if (payload.type === 'error') { if (liveSocketRef.current !== socket) return; clearLiveReadyTimer(); liveSocketRef.current = null; liveActiveRef.current = false; setLiveActive(false); try { liveProcessorRef.current?.disconnect() } catch {}; liveProcessorRef.current = null; try { liveInputSourceRef.current?.disconnect() } catch {}; liveInputSourceRef.current = null; streamRef.current?.getTracks().forEach(track => track.stop()); streamRef.current = null; contextRef.current?.close().catch(() => {}); contextRef.current = null; try { socket.close(1011, 'River live voice provider error') } catch {}; setVoiceState('error'); setMessage(payload.message || 'Live voice provider is unavailable. Try again, or use reliable press-to-talk voice.'); return }
+      if (payload.type === 'error') {
+        if (liveSocketRef.current !== socket) return
+        // Live voice is an enhancement, not a single point of failure. A
+        // rejected upstream session must never leave someone on a dead voice
+        // screen: release every live resource and continue with River's
+        // authenticated, press-to-talk pipeline automatically.
+        clearLiveReadyTimer(); liveSocketRef.current = null; liveActiveRef.current = false; setLiveActive(false)
+        try { liveProcessorRef.current?.disconnect() } catch {}; liveProcessorRef.current = null
+        try { liveInputSourceRef.current?.disconnect() } catch {}; liveInputSourceRef.current = null
+        streamRef.current?.getTracks().forEach(track => track.stop()); streamRef.current = null
+        contextRef.current?.close().catch(() => {}); contextRef.current = null
+        try { socket.close(1011, 'River live voice provider error') } catch {}
+        conversationRef.current = false
+        setVoiceState('connecting'); setMessage('Live voice is unavailable right now. Switching to reliable voice…')
+        window.setTimeout(() => { void begin({ skipLive: true, mode: turnMode }) }, 0)
+        return
+      }
       const content = payload.serverContent; if (!content) return
       if (content.interrupted) { clearLivePlayback(); setVoiceState('listening'); setMessage('I’m listening. Go ahead.') }
       if (content.inputTranscription?.text) liveInputRef.current = appendTranscript(liveInputRef.current, content.inputTranscription.text)
