@@ -96,6 +96,13 @@ html{background:var(--paper);}
 body{overscroll-behavior:none;-webkit-font-smoothing:antialiased;}
 button,input,textarea{-webkit-tap-highlight-color:transparent;}
 .app-shell{isolation:isolate;}
+.river-mark{display:block;object-fit:cover;flex:0 0 auto;}
+.brand-mark.river-mark{background:transparent;color:inherit;}
+.message-river-mark{width:18px;height:18px;border-radius:6px;}
+.hero-river-mark{width:65px;height:65px;border-radius:24px;position:relative;z-index:1;box-shadow:0 8px 22px #496f5b22;}
+/* Do not reserve a third column after the memory panel closes. */
+@media(min-width:801px){.app-shell:not(:has(.memory-panel)){grid-template-columns:230px minmax(0,1fr);}}
+@media(max-width:1050px) and (min-width:801px){.app-shell:not(:has(.memory-panel)){grid-template-columns:205px minmax(0,1fr);}}
 .sidebar{min-height:0;overscroll-behavior:contain;}
 .sidebar-thread{min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;}
 .chat-area,.memory-panel,.sidebar-thread{scrollbar-width:thin;scrollbar-color:#b7c5b7 transparent;}
