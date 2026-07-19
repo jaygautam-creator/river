@@ -37,13 +37,13 @@ function accessToken(request) {
   return protocols.find(value => value && value !== 'river.live') || null
 }
 
-function providerSetup(claims) {
+function providerSetup(claims, model) {
   const memory = Array.isArray(claims.memory_context) && claims.memory_context.length
     ? `\n\nApproved River memory (use only when relevant; never invent beyond this):\n${claims.memory_context.map(item => `- ${item.topic}: ${item.summary}`).join('\n')}`
     : ''
   return JSON.stringify({
     setup: {
-      model: 'models/gemini-3.1-flash-live-preview',
+      model: `models/${model}`,
       responseModalities: ['AUDIO'],
       // Gemini Live enables server-side automatic activity detection by
       // default. Keep the setup minimal until the session is established;
@@ -71,13 +71,14 @@ export default {
     const pair = new WebSocketPair()
     const [client, browser] = Object.values(pair)
     browser.accept()
-    const provider = new WebSocket(`wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`)
-    let providerOpen = false
+    const providerModels = ['gemini-3.1-flash-live-preview', 'gemini-2.5-flash-native-audio-preview-12-2025']
+    let provider = null
     let setupReady = false
+    let fallbackUsed = false
     const queued = []
     let messageWindowStartedAt = Date.now()
     let messagesInWindow = 0
-    const sendProvider = message => providerOpen ? provider.send(message) : queued.push(message)
+    const sendProvider = message => setupReady && provider ? provider.send(message) : queued.push(message)
     const withinMessageRate = () => {
       const now = Date.now()
       if (now - messageWindowStartedAt >= 10_000) { messageWindowStartedAt = now; messagesInWindow = 0 }
@@ -85,27 +86,41 @@ export default {
       return messagesInWindow <= 80
     }
 
-    provider.addEventListener('open', () => {
-      providerOpen = true
-      provider.send(providerSetup(claims))
-      for (const message of queued.splice(0)) provider.send(message)
-    })
-    provider.addEventListener('message', event => {
-      try {
-        const message = JSON.parse(event.data)
-        if (message.error) {
-          browser.send(JSON.stringify({ type: 'error', code: 'provider_rejected', message: String(message.error.message || 'The live voice provider rejected this session.').slice(0, 240) }))
-          return close(browser, 1011, 'Provider rejected session')
-        }
-        if (message.setupComplete) {
-          setupReady = true
-          return browser.send(JSON.stringify({ type: 'session.ready', user_id: claims.id }))
-        }
-      } catch {}
-      browser.send(event.data)
-    })
-    provider.addEventListener('error', () => { browser.send(JSON.stringify({ type: 'error', code: 'provider_unavailable', message: 'The live voice provider could not be reached.' })); close(browser, 1011, 'Provider unavailable') })
-    provider.addEventListener('close', event => {
+    const connectProvider = model => {
+      const candidate = new WebSocket(`wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`)
+      provider = candidate
+      const retryWithFallback = source => {
+        if (setupReady || fallbackUsed || model !== providerModels[0]) return false
+        fallbackUsed = true
+        console.info('Retrying Gemini Live with the compatible native-audio model', { source })
+        connectProvider(providerModels[1])
+        close(candidate, 1000, 'Trying compatible Live model')
+        return true
+      }
+      candidate.addEventListener('open', () => candidate.send(providerSetup(claims, model)))
+      candidate.addEventListener('message', event => {
+        try {
+          const message = JSON.parse(event.data)
+          if (message.error) {
+            if (retryWithFallback('provider_message')) return
+            browser.send(JSON.stringify({ type: 'error', code: 'provider_rejected', message: String(message.error.message || 'The live voice provider rejected this session.').slice(0, 240) }))
+            return close(browser, 1011, 'Provider rejected session')
+          }
+          if (message.setupComplete) {
+            setupReady = true
+            for (const queuedMessage of queued.splice(0)) candidate.send(queuedMessage)
+            return browser.send(JSON.stringify({ type: 'session.ready', user_id: claims.id }))
+          }
+        } catch {}
+        browser.send(event.data)
+      })
+      candidate.addEventListener('error', () => {
+        if (provider !== candidate || retryWithFallback('provider_error')) return
+        browser.send(JSON.stringify({ type: 'error', code: 'provider_unavailable', message: 'The live voice provider could not be reached.' }))
+        close(browser, 1011, 'Provider unavailable')
+      })
+      candidate.addEventListener('close', event => {
+      if (provider !== candidate) return
       // Keep the provider's diagnostic in Worker logs only. It can help
       // diagnose a rejected setup without exposing implementation details or
       // credentials to the browser.
@@ -114,6 +129,7 @@ export default {
         code: event.code,
         reason: String(event.reason || '').slice(0, 160)
       })
+      if (retryWithFallback('provider_close')) return
       if (!setupReady) {
         // Do not expose credentials or provider payloads. The close code is
         // enough to distinguish an unavailable service from a rejected setup
@@ -121,7 +137,9 @@ export default {
         browser.send(JSON.stringify({ type: 'error', code: 'provider_closed', message: `The live voice provider closed before the session was ready (code ${event.code || 'unknown'}).` }))
       }
       close(browser, 1000, 'Provider session closed')
-    })
+      })
+    }
+    connectProvider(providerModels[0])
     browser.addEventListener('message', event => {
       if (!withinMessageRate() || !allowedMessage(event.data)) return close(browser, 1008, 'Unsupported or excessive live message')
       sendProvider(event.data)
