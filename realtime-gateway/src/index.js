@@ -45,8 +45,6 @@ function providerSetup(claims) {
     setup: {
       model: 'models/gemini-3.1-flash-live-preview',
       responseModalities: ['AUDIO'],
-      inputAudioTranscription: {},
-      outputAudioTranscription: {},
       // Gemini Live enables server-side automatic activity detection by
       // default. Keep the setup minimal until the session is established;
       // provider-side turn tuning can be added back after compatibility is
