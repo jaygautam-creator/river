@@ -371,7 +371,75 @@ app.delete('/api/storylines/:id', auth, async (req, res) => { const result = awa
 app.get('/api/storylines/:id/history', auth, async (req, res) => { const hit = (await q('SELECT id FROM storylines WHERE id=$1 AND user_id=$2', [req.params.id, req.user.id])).rows[0]; if (!hit) return res.status(404).json({ error: 'Memory not found.' }); res.json({ events: (await q('SELECT event,detail,created_at FROM memory_events WHERE user_id=$1 AND storyline_id=$2 ORDER BY id DESC LIMIT 30', [req.user.id, hit.id])).rows }) })
 app.post('/api/chat', auth, quota('chat', 'DAILY_CHAT_LIMIT', 120), async (req, res) => { try { const content = String(req.body?.content || '').trim(); if (!content) return res.status(400).json({ error: 'Message is empty.' }); const thread = await ensureThread(req.user.id, req.body?.thread_id); await q("INSERT INTO messages(user_id,thread_id,role,content) VALUES($1,$2,'user',$3)", [req.user.id, thread.id, content]); await q('UPDATE threads SET updated_at=NOW() WHERE id=$1', [thread.id]); const [context, recent] = await Promise.all([relevantStories(req.user.id, content), recentThreadMessages(req.user.id, thread.id)]); const [candidates, text] = await Promise.all([req.user.memory_enabled ? extractMemories(content, context, recent) : Promise.resolve([]), reply(content, context, req.user.name, Boolean(req.body?.voice), recent)]); const memory = await persistMemoryCandidates(req.user, candidates, content); await q("INSERT INTO messages(user_id,thread_id,role,content) VALUES($1,$2,'assistant',$3)", [req.user.id, thread.id, text]); audit(req, 'chat.message', { content_length: content.length, voice: Boolean(req.body?.voice), auto_memory_count: memory.storylines.length, proposed_memory_count: memory.proposals.length }); res.json({ reply: text, provider: process.env.GROQ_API_KEY ? 'groq' : 'local-fallback', thread, proposals: await proposals(req.user.id), storylines: await stories(req.user.id), context }) } catch (error) { console.error(error); res.status(502).json({ error: 'River could not create a reply. Please try again.' }) } })
 
-app.get('/api/voice/session', auth, (req, res) => res.json({ enabled: Boolean(process.env.GROQ_API_KEY), provider: process.env.GROQ_API_KEY ? 'groq' : null, transcription_model: process.env.GROQ_TRANSCRIPTION_MODEL || 'whisper-large-v3-turbo', speech_model: process.env.GROQ_SPEECH_MODEL || 'canopylabs/orpheus-v1-english', device_speech_fallback: true, message: process.env.GROQ_API_KEY ? 'Groq voice is ready. River can use your device voice if provider speech is unavailable.' : 'Voice is not configured.' }))
+const pcm16ToWav = (pcm, sampleRate = 24_000) => {
+  const header = Buffer.alloc(44)
+  header.write('RIFF', 0)
+  header.writeUInt32LE(36 + pcm.length, 4)
+  header.write('WAVE', 8)
+  header.write('fmt ', 12)
+  header.writeUInt32LE(16, 16)
+  header.writeUInt16LE(1, 20)
+  header.writeUInt16LE(1, 22)
+  header.writeUInt32LE(sampleRate, 24)
+  header.writeUInt32LE(sampleRate * 2, 28)
+  header.writeUInt16LE(2, 32)
+  header.writeUInt16LE(16, 34)
+  header.write('data', 36)
+  header.writeUInt32LE(pcm.length, 40)
+  return Buffer.concat([header, pcm])
+}
+
+const geminiSpeech = async input => {
+  const model = process.env.GEMINI_SPEECH_MODEL || 'gemini-3.1-flash-tts-preview'
+  const response = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+    method: 'POST',
+    headers: { 'x-goog-api-key': process.env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(35_000),
+    body: JSON.stringify({
+      model,
+      input: `Read the following as River: warm, calm, conversational, clear international English. Keep a consistent feminine-presenting tone without dramatizing or adding words.\n\n${input}`,
+      response_format: { type: 'audio' },
+      generation_config: { speech_config: [{ voice: process.env.GEMINI_SPEECH_VOICE || 'Aoede' }] }
+    })
+  })
+  if (!response.ok) {
+    const failure = await response.json().catch(() => ({}))
+    const code = String(failure?.error?.status || failure?.error?.code || 'gemini_speech_error').slice(0, 96)
+    throw Object.assign(new Error('Gemini speech failed'), { provider: 'gemini', status: response.status, code, model })
+  }
+  const payload = await response.json()
+  const audio = payload?.output_audio?.data
+  if (!audio) throw Object.assign(new Error('Gemini speech response had no audio'), { provider: 'gemini', status: 502, code: 'gemini_speech_no_audio', model })
+  return { audio: pcm16ToWav(Buffer.from(audio, 'base64')), provider: 'gemini', model }
+}
+
+const groqSpeech = async input => {
+  const model = process.env.GROQ_SPEECH_MODEL || 'canopylabs/orpheus-v1-english'
+  const response = await fetch('https://api.groq.com/openai/v1/audio/speech', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(35_000),
+    body: JSON.stringify({ model, voice: process.env.GROQ_SPEECH_VOICE || 'hannah', input, response_format: 'wav' })
+  })
+  if (!response.ok) {
+    const failure = await response.json().catch(() => ({}))
+    const code = String(failure?.error?.code || failure?.error?.type || 'speech_provider_error').slice(0, 96)
+    throw Object.assign(new Error('Groq speech failed'), { provider: 'groq', status: response.status, code, model })
+  }
+  return { audio: Buffer.from(await response.arrayBuffer()), provider: 'groq', model }
+}
+
+app.get('/api/voice/session', auth, (req, res) => {
+  const speechProvider = process.env.GEMINI_API_KEY ? 'gemini' : (process.env.GROQ_API_KEY ? 'groq' : null)
+  res.json({
+    enabled: Boolean(process.env.GROQ_API_KEY && speechProvider),
+    provider: speechProvider,
+    transcription_model: process.env.GROQ_TRANSCRIPTION_MODEL || 'whisper-large-v3-turbo',
+    speech_model: speechProvider === 'gemini' ? (process.env.GEMINI_SPEECH_MODEL || 'gemini-3.1-flash-tts-preview') : (process.env.GROQ_SPEECH_MODEL || 'canopylabs/orpheus-v1-english'),
+    device_speech_fallback: true,
+    message: process.env.GROQ_API_KEY && speechProvider ? `River voice is ready with ${speechProvider === 'gemini' ? 'Gemini speech and Groq transcription' : 'Groq'}.` : 'Voice requires a configured transcription provider.'
+  })
+})
 app.get('/api/voice/live/session', auth, async (req, res) => {
   // A Vercel request handler is intentionally not presented as a WebSocket relay.
   // Live audio must run through a separately deployed, regional gateway that can
@@ -384,37 +452,32 @@ app.get('/api/voice/live/session', auth, async (req, res) => {
 app.post('/api/voice/live/turn', auth, quota('voice_live_turn', 'DAILY_VOICE_TURN_LIMIT', 45), async (req, res) => { try { const content = String(req.body?.content || '').trim().slice(0, 5000); const replyText = String(req.body?.reply || '').trim().slice(0, 5000); if (!content || !replyText) return res.status(400).json({ error: 'A completed voice turn is required.' }); const thread = await ensureThread(req.user.id, req.body?.thread_id); await q("INSERT INTO messages(user_id,thread_id,role,content) VALUES($1,$2,'user',$3),($1,$2,'assistant',$4)", [req.user.id, thread.id, content, replyText]); await q('UPDATE threads SET updated_at=NOW() WHERE id=$1', [thread.id]); const [context, recent] = await Promise.all([relevantStories(req.user.id, content), recentThreadMessages(req.user.id, thread.id)]); const candidates = req.user.memory_enabled ? await extractMemories(content, context, recent) : []; const memory = await persistMemoryCandidates(req.user, candidates, content); audit(req, 'voice.live_turn', { content_length: content.length, reply_length: replyText.length, auto_memory_count: memory.storylines.length, proposed_memory_count: memory.proposals.length }); res.json({ thread, proposals: await proposals(req.user.id), storylines: await stories(req.user.id) }) } catch (error) { console.error(error); res.status(502).json({ error: 'River could not save this live voice turn.' }) } })
 app.post('/api/voice/transcribe', auth, quota('voice_transcription', 'DAILY_VOICE_TRANSCRIPTION_LIMIT', 45), express.raw({ type: 'audio/*', limit: '25mb' }), async (req, res) => { if (!process.env.GROQ_API_KEY) return res.status(503).json({ error: 'Groq voice is not configured.' }); if (!Buffer.isBuffer(req.body) || req.body.length < 32) return res.status(400).json({ error: 'A short audio recording is required.' }); try { const form = new FormData(); form.append('file', new Blob([req.body], { type: req.headers['content-type'] || 'audio/webm' }), 'river.webm'); form.append('model', process.env.GROQ_TRANSCRIPTION_MODEL || 'whisper-large-v3-turbo'); const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` }, body: form, signal: AbortSignal.timeout(35_000) }); if (!response.ok) throw new Error('transcription failed'); const transcript = String((await response.json()).text || '').trim(); transcript ? res.json({ transcript }) : res.status(422).json({ error: 'River could not hear any speech.' }) } catch { res.status(502).json({ error: 'River could not transcribe this recording.' }) } })
 app.post('/api/voice/speak', auth, quota('voice_speech', 'DAILY_VOICE_SPEECH_LIMIT', 60), async (req, res) => {
-  if (!process.env.GROQ_API_KEY) return res.status(503).json({ error: 'Groq voice is not configured.', code: 'voice_not_configured' })
+  if (!process.env.GEMINI_API_KEY && !process.env.GROQ_API_KEY) return res.status(503).json({ error: 'River voice is not configured.', code: 'voice_not_configured' })
   // A 200-character cap was short enough to cut a normal three-sentence reply
   // in the middle. The reply model is already instructed to be concise; this
   // defensive cap only protects the provider request.
   const input = String(req.body?.text || '').trim().slice(0, 600)
   if (!input) return res.status(400).json({ error: 'Text is required.', code: 'text_required' })
-  const model = process.env.GROQ_SPEECH_MODEL || 'canopylabs/orpheus-v1-english'
   try {
-    const response = await fetch('https://api.groq.com/openai/v1/audio/speech', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(35_000),
-      // The production setting is River's chosen voice. Browser fallbacks are
-      // separately gated in the client, so restoring this setting preserves the
-      // preferred River persona without allowing an unrelated device default to
-      // switch voices mid-conversation.
-      body: JSON.stringify({ model, voice: process.env.GROQ_SPEECH_VOICE || 'hannah', input, response_format: 'wav' })
-    })
-    if (!response.ok) {
-      const failure = await response.json().catch(() => ({}))
-      const code = String(failure?.error?.code || failure?.error?.type || 'speech_provider_error').slice(0, 96)
-      console.warn('voice.speak.provider_failure', { status: response.status, code, model })
-      if (code === 'model_terms_required') return res.status(412).json({ error: 'Groq requires one-time acceptance for River’s speech model. River’s reply is still available in text.', code })
-      if (response.status === 429) return res.status(429).json({ error: 'River’s speech provider is busy right now. River’s reply is still available in text.', code })
-      if (response.status === 401 || response.status === 403) return res.status(503).json({ error: 'River’s speech provider is not available for this environment. River’s reply is still available in text.', code })
-      return res.status(502).json({ error: 'River’s speech provider is temporarily unavailable. River’s reply is still available in text.', code })
+    let speech
+    let geminiFailure
+    if (process.env.GEMINI_API_KEY) {
+      try { speech = await geminiSpeech(input) } catch (error) { geminiFailure = error; console.warn('voice.speak.provider_failure', { provider: error.provider, status: error.status, code: error.code, model: error.model }) }
     }
+    if (!speech && process.env.GROQ_API_KEY) {
+      try { speech = await groqSpeech(input) } catch (error) {
+        console.warn('voice.speak.provider_failure', { provider: error.provider, status: error.status, code: error.code, model: error.model })
+        if (error.code === 'model_terms_required') return res.status(412).json({ error: 'Groq requires one-time acceptance for River’s speech model. River’s reply is still available in text.', code: error.code })
+        if (error.status === 429) return res.status(429).json({ error: 'River’s speech provider is busy right now. River’s reply is still available in text.', code: error.code })
+        return res.status(error.status === 401 || error.status === 403 ? 503 : 502).json({ error: 'River’s speech provider is temporarily unavailable. River’s reply is still available in text.', code: error.code })
+      }
+    }
+    if (!speech) return res.status(geminiFailure?.status === 429 ? 429 : 502).json({ error: 'River’s speech provider is temporarily unavailable. River’s reply is still available in text.', code: geminiFailure?.code || 'speech_provider_error' })
     res.setHeader('Content-Type', 'audio/wav')
-    res.send(Buffer.from(await response.arrayBuffer()))
+    res.setHeader('X-River-Speech-Provider', speech.provider)
+    res.send(speech.audio)
   } catch (error) {
-    console.warn('voice.speak.request_failure', { name: error?.name || 'unknown', model })
+    console.warn('voice.speak.request_failure', { name: error?.name || 'unknown' })
     res.status(502).json({ error: 'River’s speech provider is temporarily unavailable. River’s reply is still available in text.', code: 'speech_request_failed' })
   }
 })

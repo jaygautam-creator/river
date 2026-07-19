@@ -72,22 +72,24 @@ EMAIL_FROM="River <hello@example.com>"
 - Server-side Groq chat integration for real companion responses, with Gemini and deterministic local fallbacks when no key is configured.
 - Persistent multi-conversation threads and search across conversations and approved memories.
 - User-controlled memory proposals, privacy preferences, and JSON data export.
-- Adaptive Groq voice mode: start once, River calibrates to ambient sound, waits for sustained speech and a natural pause, replies aloud, and resumes listening. It supports sustained-speech barge-in and a press-to-talk fallback for noisy environments. Recordings are not stored by River.
+- Adaptive voice mode: Groq handles transcription; Gemini TTS is preferred when configured, with Groq speech as an automatic fallback. River waits for sustained speech and a natural pause, replies aloud, and resumes listening. It supports sustained-speech barge-in and a press-to-talk fallback for noisy environments. Recordings are not stored by River.
 - Health, readiness, and authenticated metrics endpoints plus CI build/audit checks.
 - Email verification, authenticator-app MFA, refresh-session device listing/revocation, temporary failed-login lockout, and transactional password-reset delivery interfaces.
 
-## Groq voice setup
+## Voice setup
 
 Set these optional values in the ignored `.env` file to override the defaults:
 
 ```bash
 GROQ_TRANSCRIPTION_MODEL=whisper-large-v3-turbo
 GROQ_SPEECH_MODEL=canopylabs/orpheus-v1-english
+GEMINI_SPEECH_MODEL=gemini-3.1-flash-tts-preview
+GEMINI_SPEECH_VOICE=Aoede
 ```
 
 Voice starts hands-free by default: River calibrates to ambient sound, detects sustained speech, waits longer after short or unfinished turns, transcribes the turn, replies in the active conversation thread, speaks the reply, and resumes listening. A sustained interruption stops River’s speech; press-to-talk is available when a room is noisy or browser speech awareness is unavailable. River does not persist the audio recording.
 
-Before the first spoken reply, open Groq's Orpheus English model in its playground and accept its one-time model terms. River shows a direct instruction if this has not been completed.
+With `GEMINI_API_KEY`, River prefers Gemini TTS for a consistent voice and falls back to the configured Groq voice if Gemini's preview or free-tier quota is unavailable. Groq remains required for the current transcription path. Before the first Groq fallback reply, open Groq's Orpheus English model in its playground and accept its one-time model terms.
 
 ## Memory evaluation
 

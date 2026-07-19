@@ -71,16 +71,16 @@ if (locked.status !== 429) throw new Error(`Account lockout failed: ${locked.sta
 const voiceSession = await fetch(`${base}/api/voice/session`, { headers: authHeaders })
 const voiceConfig = await voiceSession.json()
 if (!voiceSession.ok) throw new Error('Voice configuration check failed')
-if (health.provider === 'groq' && (!voiceConfig.enabled || voiceConfig.provider !== 'groq')) throw new Error('Groq voice configuration failed')
-if (health.provider !== 'groq' && voiceConfig.enabled !== false) throw new Error('Voice configuration fallback failed')
+if (process.env.GROQ_API_KEY && (!voiceConfig.enabled || !['groq', 'gemini'].includes(voiceConfig.provider))) throw new Error('Voice configuration failed')
+if (!process.env.GROQ_API_KEY && voiceConfig.enabled !== false) throw new Error('Voice configuration fallback failed')
 const voiceCall = await fetch(`${base}/api/voice/call`, { method: 'POST', headers: { ...authHeaders, 'content-type': 'application/json' }, body: JSON.stringify({ sdp: 'v=0\r\n' }) })
 if (voiceCall.status !== 503) throw new Error(`Voice provider fallback failed: ${voiceCall.status}`)
-if (health.provider === 'groq') {
+if (process.env.GROQ_API_KEY) {
   const emptyTranscription = await fetch(`${base}/api/voice/transcribe`, { method: 'POST', headers: { ...authHeaders, 'content-type': 'audio/webm' }, body: Buffer.from('too-short') })
   if (emptyTranscription.status !== 400) throw new Error(`Voice input validation failed: ${emptyTranscription.status}`)
   const speech = await fetch(`${base}/api/voice/speak`, { method: 'POST', headers: { ...authHeaders, 'content-type': 'application/json' }, body: JSON.stringify({ text: 'River is ready.' }) })
-  if (![200, 412, 429, 502, 503].includes(speech.status)) throw new Error(`Groq speech generation failed: ${speech.status}`)
-  if (speech.status === 200 && !speech.headers.get('content-type')?.startsWith('audio/')) throw new Error('Groq speech did not return audio')
+  if (![200, 412, 429, 502, 503].includes(speech.status)) throw new Error(`Speech generation failed: ${speech.status}`)
+  if (speech.status === 200 && !speech.headers.get('content-type')?.startsWith('audio/')) throw new Error('Speech did not return audio')
 }
 const exported = await fetch(`${base}/api/privacy/export`, { headers: authHeaders })
 if (!exported.ok) throw new Error(`Privacy export failed: ${exported.status}`)
