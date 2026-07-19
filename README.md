@@ -91,6 +91,8 @@ Before the first spoken reply, open Groq's Orpheus English model in its playgrou
 
 ## Memory evaluation
 
+The latest deployed baseline, including multi-memory extraction and cross-thread recall, is recorded in [the evaluation report](docs/evaluations/memory-eval-2026-07-19.md). It is a small controlled suite, not a population-level accuracy claim.
+
 River includes a small, reproducible memory-quality harness. It sends four durable-storyline cases and four cases that should not become memories, then reports proposal precision, recall, and F1. It also approves one proposed memory, opens a new thread, and checks whether River recalls the approved summary without relying on the old thread’s raw messages.
 
 ```bash
