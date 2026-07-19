@@ -396,10 +396,11 @@ app.post('/api/voice/speak', auth, quota('voice_speech', 'DAILY_VOICE_SPEECH_LIM
       method: 'POST',
       headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
       signal: AbortSignal.timeout(35_000),
-      // River has one product voice. Keeping this fixed prevents a reply from
-      // switching persona because an environment variable or browser default
-      // happened to differ between turns.
-      body: JSON.stringify({ model, voice: 'hannah', input, response_format: 'wav' })
+      // The production setting is River's chosen voice. Browser fallbacks are
+      // separately gated in the client, so restoring this setting preserves the
+      // preferred River persona without allowing an unrelated device default to
+      // switch voices mid-conversation.
+      body: JSON.stringify({ model, voice: process.env.GROQ_SPEECH_VOICE || 'hannah', input, response_format: 'wav' })
     })
     if (!response.ok) {
       const failure = await response.json().catch(() => ({}))
