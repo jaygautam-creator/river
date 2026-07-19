@@ -28,8 +28,13 @@ function allowedMessage(raw) {
     const message = JSON.parse(raw)
     // River creates the provider setup itself. A browser may submit only live
     // input/control messages, so it cannot override model, system policy, or tools.
-    return Boolean(message.realtimeInput || message.toolResponse)
+    return Object.keys(message).length === 1 && Boolean(message.realtimeInput?.audio?.data)
   } catch { return false }
+}
+
+function accessToken(request) {
+  const protocols = String(request.headers.get('Sec-WebSocket-Protocol') || '').split(',').map(value => value.trim())
+  return protocols.find(value => value && value !== 'river.live') || null
 }
 
 function providerSetup(claims) {
@@ -55,7 +60,10 @@ export default {
     if (new URL(request.url).pathname !== '/live') return json({ error: 'Not found.' }, 404)
     if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') return json({ error: 'Expected a WebSocket upgrade.' }, 426)
     if (env.ALLOWED_ORIGIN && request.headers.get('Origin') !== env.ALLOWED_ORIGIN) return json({ error: 'Origin is not allowed.' }, 403)
-    const token = new URL(request.url).searchParams.get('access_token')
+    // Keep the short-lived bearer token out of URLs, which are more likely to
+    // be retained by proxy and analytics logs. The browser supplies it as a
+    // WebSocket subprotocol while River selects the fixed `river.live` protocol.
+    const token = accessToken(request)
     const claims = await verifyRiverJwt(token, env.RIVER_JWT_SECRET)
     if (!claims) return json({ error: 'Unauthorized.' }, 401)
     if (!env.GEMINI_API_KEY) return json({ error: 'Gemini Live is not configured.' }, 503)
@@ -67,7 +75,15 @@ export default {
     let providerOpen = false
     let setupReady = false
     const queued = []
+    let messageWindowStartedAt = Date.now()
+    let messagesInWindow = 0
     const sendProvider = message => providerOpen ? provider.send(message) : queued.push(message)
+    const withinMessageRate = () => {
+      const now = Date.now()
+      if (now - messageWindowStartedAt >= 10_000) { messageWindowStartedAt = now; messagesInWindow = 0 }
+      messagesInWindow += 1
+      return messagesInWindow <= 80
+    }
 
     provider.addEventListener('open', () => {
       providerOpen = true
@@ -91,10 +107,10 @@ export default {
     provider.addEventListener('error', () => { browser.send(JSON.stringify({ type: 'error', code: 'provider_unavailable', message: 'The live voice provider could not be reached.' })); close(browser, 1011, 'Provider unavailable') })
     provider.addEventListener('close', event => { if (!setupReady) browser.send(JSON.stringify({ type: 'error', code: 'provider_closed', message: 'The live voice provider closed before the session was ready.' })); close(browser, 1000, 'Provider session closed') })
     browser.addEventListener('message', event => {
-      if (!allowedMessage(event.data)) return close(browser, 1008, 'Unsupported live message')
+      if (!withinMessageRate() || !allowedMessage(event.data)) return close(browser, 1008, 'Unsupported or excessive live message')
       sendProvider(event.data)
     })
     browser.addEventListener('close', () => close(provider, 1000, 'Browser disconnected'))
-    return new Response(null, { status: 101, webSocket: client })
+    return new Response(null, { status: 101, webSocket: client, headers: { 'Sec-WebSocket-Protocol': 'river.live' } })
   }
 }
