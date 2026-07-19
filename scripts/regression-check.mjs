@@ -18,7 +18,9 @@ for (const [name, source, expected] of [
   ['passkey safety gate', api, "readiness: 'foundation-only'"],
   ['live voice short-lived token', api, "expiresIn: '60s'"],
   ['live voice reconnect guard', client, 'liveReconnectAttemptsRef'],
+  ['live voice setup deadline', client, 'liveReadyTimerRef'],
   ['voice press-to-talk fallback', client, 'Press to talk'],
+  ['voice recovery fallback', client, 'Use reliable voice'],
   ['dialog accessible names', client, 'aria-modal="true"'],
   ['visible keyboard focus', css, 'button:focus-visible']
 ]) assert.ok(source.includes(expected), `Missing regression contract: ${name}`)

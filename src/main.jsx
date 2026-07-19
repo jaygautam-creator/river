@@ -170,16 +170,18 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
   const [message, setMessage] = useState('Start once. River listens for a sustained voice, waits for a natural pause, then responds.')
   const streamRef = useRef(null), audioRef = useRef(null), recorderRef = useRef(null), audioUrlRef = useRef(null), speechAbortRef = useRef(null)
   const contextRef = useRef(null), analyserRef = useRef(null), monitorRef = useRef(null), recognitionRef = useRef(null), conversationRef = useRef(false)
-  const liveSocketRef = useRef(null), liveProcessorRef = useRef(null), liveInputSourceRef = useRef(null), liveSourcesRef = useRef(new Set()), liveNextPlaybackRef = useRef(0), liveInputRef = useRef(''), liveOutputRef = useRef(''), liveReconnectAttemptsRef = useRef(0), liveReconnectTimerRef = useRef(null)
+  const liveSocketRef = useRef(null), liveProcessorRef = useRef(null), liveInputSourceRef = useRef(null), liveSourcesRef = useRef(new Set()), liveNextPlaybackRef = useRef(0), liveInputRef = useRef(''), liveOutputRef = useRef(''), liveReconnectAttemptsRef = useRef(0), liveReconnectTimerRef = useRef(null), liveReadyTimerRef = useRef(null), liveActiveRef = useRef(false)
+  const [liveActive, setLiveActive] = useState(false)
   const stateRef = useRef('idle'), heardSpeechRef = useRef(false), lastSpeechRef = useRef(0), speechOnsetRef = useRef(0), turnStartedRef = useRef(0), noiseFloorRef = useRef(2.2), interimRef = useRef(''), turnNonceRef = useRef(0), manualTurnRef = useRef(false)
   const setVoiceState = value => { stateRef.current = value; setState(value) }
   const metric = (stage, startedAt, outcome = 'ok') => { if (startedAt) void api('/api/telemetry/voice', { method: 'POST', body: JSON.stringify({ stage, duration_ms: Date.now() - startedAt, outcome }) }).catch(() => {}) }
   const clearMonitor = () => { if (monitorRef.current) window.clearInterval(monitorRef.current); monitorRef.current = null }
+  const clearLiveReadyTimer = () => { if (liveReadyTimerRef.current) window.clearTimeout(liveReadyTimerRef.current); liveReadyTimerRef.current = null }
   const stopRecognition = () => { try { recognitionRef.current?.stop() } catch {} recognitionRef.current = null }
   const discardAudio = () => { if (audioRef.current) { audioRef.current.pause(); audioRef.current.removeAttribute('src') }; if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current); audioUrlRef.current = null }
   const clearLivePlayback = () => { liveSourcesRef.current.forEach(source => { try { source.stop() } catch {} }); liveSourcesRef.current.clear(); liveNextPlaybackRef.current = contextRef.current?.currentTime || 0 }
   const stop = () => {
-    conversationRef.current = false; turnNonceRef.current += 1; clearMonitor(); stopRecognition(); speechAbortRef.current?.abort(); speechAbortRef.current = null; if (liveReconnectTimerRef.current) window.clearTimeout(liveReconnectTimerRef.current); liveReconnectTimerRef.current = null; liveReconnectAttemptsRef.current = 0
+    conversationRef.current = false; turnNonceRef.current += 1; clearMonitor(); clearLiveReadyTimer(); stopRecognition(); speechAbortRef.current?.abort(); speechAbortRef.current = null; if (liveReconnectTimerRef.current) window.clearTimeout(liveReconnectTimerRef.current); liveReconnectTimerRef.current = null; liveReconnectAttemptsRef.current = 0; liveActiveRef.current = false; setLiveActive(false)
     try { liveSocketRef.current?.close(1000, 'River voice session ended') } catch {} liveSocketRef.current = null
     try { liveProcessorRef.current?.disconnect() } catch {} liveProcessorRef.current = null
     try { liveInputSourceRef.current?.disconnect() } catch {} liveInputSourceRef.current = null; clearLivePlayback()
@@ -250,17 +252,23 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
   const beginLive = async (session, reuseMedia = false) => {
     const stream = reuseMedia && streamRef.current ? streamRef.current : await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } }); streamRef.current = stream
     const AudioContextClass = window.AudioContext || window.webkitAudioContext; const context = reuseMedia && contextRef.current ? contextRef.current : new AudioContextClass(); contextRef.current = context; if (context.state === 'suspended') await context.resume()
-    const socket = new WebSocket(session.gateway_url, ['river.live', session.token]); liveSocketRef.current = socket
+    const socket = new WebSocket(session.gateway_url, ['river.live', session.token]); liveSocketRef.current = socket; liveActiveRef.current = false; setLiveActive(false)
+    liveReadyTimerRef.current = window.setTimeout(() => {
+      if (liveSocketRef.current !== socket || liveActiveRef.current) return
+      liveSocketRef.current = null; liveActiveRef.current = false; setLiveActive(false)
+      try { socket.close(1000, 'River live voice setup timed out') } catch {}
+      setVoiceState('error'); setMessage('Live voice did not finish connecting. Try again, or use reliable press-to-talk voice.')
+    }, 12000)
     const startCapture = () => {
       if (!conversationRef.current || liveProcessorRef.current) return
       const source = context.createMediaStreamSource(stream); const processor = context.createScriptProcessor(2048, 1, 1); liveInputSourceRef.current = source; liveProcessorRef.current = processor
       processor.onaudioprocess = event => { if (socket.readyState !== WebSocket.OPEN || !conversationRef.current) return; socket.send(JSON.stringify({ realtimeInput: { audio: { data: pcmBase64(event.inputBuffer.getChannelData(0)), mimeType: 'audio/pcm;rate=16000' } } })) }
-      source.connect(processor); processor.connect(context.destination); setVoiceState('listening'); setMessage('Live voice is listening. River will respond after a natural pause.')
+      source.connect(processor); processor.connect(context.destination); liveActiveRef.current = true; setLiveActive(true); setVoiceState('listening'); setMessage('Live voice is listening. River will respond after a natural pause.')
     }
     socket.onmessage = event => {
       let payload; try { payload = JSON.parse(event.data) } catch { return }
-      if (payload.type === 'session.ready') { startCapture(); return }
-      if (payload.type === 'error') { setVoiceState('error'); setMessage(payload.message || 'Live voice provider is unavailable. Try again or use River’s text mode.'); return }
+      if (payload.type === 'session.ready') { clearLiveReadyTimer(); startCapture(); return }
+      if (payload.type === 'error') { if (liveSocketRef.current !== socket) return; clearLiveReadyTimer(); liveSocketRef.current = null; liveActiveRef.current = false; setLiveActive(false); try { liveProcessorRef.current?.disconnect() } catch {}; liveProcessorRef.current = null; try { liveInputSourceRef.current?.disconnect() } catch {}; liveInputSourceRef.current = null; streamRef.current?.getTracks().forEach(track => track.stop()); streamRef.current = null; contextRef.current?.close().catch(() => {}); contextRef.current = null; try { socket.close(1011, 'River live voice provider error') } catch {}; setVoiceState('error'); setMessage(payload.message || 'Live voice provider is unavailable. Try again, or use reliable press-to-talk voice.'); return }
       const content = payload.serverContent; if (!content) return
       if (content.interrupted) { clearLivePlayback(); setVoiceState('listening'); setMessage('I’m listening. Go ahead.') }
       if (content.inputTranscription?.text) liveInputRef.current = appendTranscript(liveInputRef.current, content.inputTranscription.text)
@@ -268,12 +276,16 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
       for (const part of content.modelTurn?.parts || []) if (part.inlineData?.data) { playLivePcm(part.inlineData.data); setVoiceState('speaking'); setMessage('River is responding. Speak naturally to interrupt.') }
       if (content.turnComplete) { void persistLiveTurn(); if (conversationRef.current) { setVoiceState('listening'); setMessage('Listening for what you want to say next…') } }
     }
-    socket.onerror = () => { if (conversationRef.current) setMessage('Live voice connection is recovering…') }
+    socket.onerror = () => { if (conversationRef.current && liveSocketRef.current === socket) { setVoiceState('connecting'); setMessage('Live voice connection is recovering…') } }
     socket.onclose = event => {
+      if (liveSocketRef.current !== socket) return
+      clearLiveReadyTimer()
+      liveSocketRef.current = null; liveActiveRef.current = false; setLiveActive(false)
       if (!conversationRef.current || event.wasClean) return
       if (liveReconnectAttemptsRef.current < 1) {
+        setVoiceState('connecting'); setMessage('Live voice connection dropped. Reconnecting once…')
         liveReconnectTimerRef.current = window.setTimeout(() => { reconnectLive().catch(error => { setVoiceState('error'); setMessage(error.message || 'Live voice disconnected. Try again or continue by text.') }) }, 500)
-      } else { setVoiceState('error'); setMessage('Live voice disconnected. Try again or continue by text.') }
+      } else { setVoiceState('error'); setMessage('Live voice disconnected. Try again, or use reliable press-to-talk voice.') }
     }
   }
   const playCurrentReply = async () => {
@@ -317,10 +329,10 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
     recorder.start(250); setVoiceState('listening'); setMessage(manual ? 'Listening while you hold the button…' : 'Listening… River will wait for a natural pause.')
   }
   const stopManualTurn = () => { if (manualTurnRef.current && recorderRef.current?.state === 'recording') { heardSpeechRef.current = true; recorderRef.current.stop() } }
-  const begin = async () => {
+  const begin = async ({ skipLive = false, mode = turnMode } = {}) => {
     setVoiceState('connecting'); setMessage('Checking your microphone permission…')
     try {
-      const live = await api('/api/voice/live/session').catch(() => null)
+      const live = skipLive ? null : await api('/api/voice/live/session').catch(() => null)
       if (live?.enabled) { conversationRef.current = true; liveReconnectAttemptsRef.current = 0; await beginLive(live); return }
       const session = await api('/api/voice/session')
       if (!session.enabled || session.provider !== 'groq') throw new Error('Groq voice is not configured for this River environment yet.')
@@ -341,14 +353,15 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
         if (stateRef.current === 'speaking' && sustainedInterruption) { metric('turn', turnStartedRef.current, 'interrupted'); speechAbortRef.current?.abort(); discardAudio(); beginListening(false); return }
         if (stateRef.current === 'listening' && !manualTurnRef.current && heardSpeechRef.current && now - turnStartedRef.current >= 520 && now - lastSpeechRef.current > pauseForCurrentTurn()) recorderRef.current?.stop()
       }, 80)
-      if (turnMode === 'handsfree') beginListening(false)
+      if (mode === 'handsfree') beginListening(false)
       else { setVoiceState('ready'); setMessage('Press and hold the button while you speak. Release it when you are done.') }
-    } catch (error) { conversationRef.current = false; clearMonitor(); try { liveSocketRef.current?.close() } catch {} liveSocketRef.current = null; try { liveProcessorRef.current?.disconnect() } catch {} liveProcessorRef.current = null; try { liveInputSourceRef.current?.disconnect() } catch {} liveInputSourceRef.current = null; streamRef.current?.getTracks().forEach(track => track.stop()); streamRef.current = null; contextRef.current?.close().catch(() => {}); contextRef.current = null; setVoiceState('error'); setMessage(error.message || 'Voice setup could not start. Check your microphone and try again.') }
+    } catch (error) { conversationRef.current = false; clearMonitor(); clearLiveReadyTimer(); try { liveSocketRef.current?.close() } catch {} liveSocketRef.current = null; liveActiveRef.current = false; setLiveActive(false); try { liveProcessorRef.current?.disconnect() } catch {} liveProcessorRef.current = null; try { liveInputSourceRef.current?.disconnect() } catch {} liveInputSourceRef.current = null; streamRef.current?.getTracks().forEach(track => track.stop()); streamRef.current = null; contextRef.current?.close().catch(() => {}); contextRef.current = null; setVoiceState('error'); setMessage(error.message || 'Voice setup could not start. Check your microphone and try again.') }
   }
   const replay = async () => { try { await playCurrentReply() } catch { setMessage('Audio is still blocked. Check this tab’s sound/autoplay permission, then try again.') } }
-  const switchMode = next => { setTurnMode(next); if (!conversationRef.current) return; if (liveSocketRef.current) { setMessage(next === 'handsfree' ? 'Live voice is listening continuously for your next thought.' : 'Live voice is active. Speak after a pause; River will wait for your turn.'); return } if (recorderRef.current?.state === 'recording') recorderRef.current.stop(); if (next === 'handsfree') beginListening(false); else { setVoiceState('ready'); setMessage('Press and hold the button while you speak. Release it when you are done.') } }
-  const canManualTurn = !liveSocketRef.current && conversationRef.current && turnMode === 'tap' && ['ready', 'listening'].includes(state)
-  return <div className="voice-screen"><button className="back-link" onClick={() => { stop(); onBack() }}>← back to text</button><div className="voice-screen-inner"><audio ref={audioRef} /><div className={`voice-breathe ${state === 'listening' ? 'recording' : ''}`}><div className="breathe-ring ring-a" /><div className="breathe-ring ring-b" /><div className="voice-center"><Mic size={30} /></div></div><div className="eyebrow centered"><span className="eyebrow-dot" /> {liveSocketRef.current ? 'live voice mode' : 'adaptive voice mode'}</div><h2>Talk naturally.</h2><p>River listens for sustained speech, respects a real pause, and only then responds.</p><div className="voice-mode-control" role="group" aria-label="Voice input mode"><button className={turnMode === 'handsfree' ? 'active' : ''} onClick={() => switchMode('handsfree')}>Hands-free</button><button className={turnMode === 'tap' ? 'active' : ''} onClick={() => switchMode('tap')}>Press to talk</button></div><div className="voice-note"><Headphones size={16} /><span>{message}</span></div>{state === 'idle' || state === 'error' ? <button className="ghost-button voice-start" onClick={begin} disabled={state === 'connecting'}>{state === 'connecting' ? <Loader2 className="spin" size={14} /> : <Mic size={14} />} {state === 'error' ? 'Try again' : 'Start conversation'}</button> : <div className="voice-actions">{canManualTurn && <button className="save-button voice-start hold-to-talk" onPointerDown={() => beginListening(true)} onPointerUp={stopManualTurn} onPointerCancel={stopManualTurn} onPointerLeave={event => { if (event.buttons) stopManualTurn() }}><Mic size={14} /> Hold to talk</button>}{state === 'awaiting-playback' && <button className="save-button voice-start" onClick={replay}><Headphones size={14} /> Play River’s reply</button>}<button className="ghost-button voice-start" onClick={stop}><X size={14} /> End conversation</button></div>}</div></div>
+  const restart = options => { stop(); void begin(options) }
+  const switchMode = next => { setTurnMode(next); if (!conversationRef.current) return; if (liveSocketRef.current || liveActiveRef.current) { if (next === 'tap') { restart({ skipLive: true, mode: 'tap' }); return } setMessage('Live voice is listening continuously for your next thought.'); return } if (recorderRef.current?.state === 'recording') recorderRef.current.stop(); if (next === 'handsfree') beginListening(false); else { setVoiceState('ready'); setMessage('Press and hold the button while you speak. Release it when you are done.') } }
+  const canManualTurn = !liveActive && conversationRef.current && turnMode === 'tap' && ['ready', 'listening'].includes(state)
+  return <div className="voice-screen"><button className="back-link" onClick={() => { stop(); onBack() }}>← back to text</button><div className="voice-screen-inner"><audio ref={audioRef} /><div className={`voice-breathe ${state === 'listening' ? 'recording' : ''}`}><div className="breathe-ring ring-a" /><div className="breathe-ring ring-b" /><div className="voice-center"><Mic size={30} /></div></div><div className="eyebrow centered"><span className="eyebrow-dot" /> {liveActive ? 'live voice mode' : 'adaptive voice mode'}</div><h2>Talk naturally.</h2><p>River listens for sustained speech, respects a real pause, and only then responds.</p><div className="voice-mode-control" role="group" aria-label="Voice input mode"><button className={turnMode === 'handsfree' ? 'active' : ''} onClick={() => switchMode('handsfree')}>Hands-free</button><button className={turnMode === 'tap' ? 'active' : ''} onClick={() => switchMode('tap')}>{liveActive ? 'Use reliable voice' : 'Press to talk'}</button></div><div className="voice-note"><Headphones size={16} /><span>{message}</span></div>{state === 'idle' || state === 'error' ? <div className="voice-recovery"><button className="ghost-button voice-start" onClick={() => restart()} disabled={state === 'connecting'}><Mic size={14} /> {state === 'error' ? 'Try live voice again' : 'Start conversation'}</button>{state === 'error' && <button className="save-button voice-start" onClick={() => { setTurnMode('tap'); restart({ skipLive: true, mode: 'tap' }) }}><Mic size={14} /> Use reliable voice</button>}</div> : <div className="voice-actions">{canManualTurn && <button className="save-button voice-start hold-to-talk" onPointerDown={() => beginListening(true)} onPointerUp={stopManualTurn} onPointerCancel={stopManualTurn} onPointerLeave={event => { if (event.buttons) stopManualTurn() }}><Mic size={14} /> Hold to talk</button>}{state === 'awaiting-playback' && <button className="save-button voice-start" onClick={replay}><Headphones size={14} /> Play River’s reply</button>}<button className="ghost-button voice-start" onClick={stop}><X size={14} /> End conversation</button></div>}</div></div>
 }
 
 function SearchPanel({ onClose, onSelectThread }) {
