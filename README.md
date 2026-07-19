@@ -9,7 +9,7 @@ River is built for the thoughts, plans, and personal projects that do not fit in
 Most conversational AI starts from zero. River is designed around continuity with consent:
 
 - **Multiple conversation threads** for different moments and contexts.
-- **Memory proposals, not silent profiling**—a structured model extractor proposes at most one grounded storyline; users approve or reject every proposal, and failed/uncertain extraction saves nothing.
+- **Consentful, useful memory**—River automatically saves clear, non-sensitive, high-confidence details that help it understand someone over time (such as enduring preferences, hobbies, plans, and projects). Sensitive or uncertain details always remain proposals for the person to review, edit, approve, or reject.
 - **Searchable continuity** across conversations and approved memories, with recall-aware retrieval that never silently falls back to a fabricated history.
 - **Real ownership controls**: edit, export, revoke memory consent, or delete the account.
 - **Privacy-ready foundations** including secure browser sessions, CSRF protection, MFA, and device-session controls.

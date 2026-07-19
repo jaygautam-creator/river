@@ -65,6 +65,7 @@ export default {
     browser.accept()
     const provider = new WebSocket(`wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`)
     let providerOpen = false
+    let setupReady = false
     const queued = []
     const sendProvider = message => providerOpen ? provider.send(message) : queued.push(message)
 
@@ -72,11 +73,23 @@ export default {
       providerOpen = true
       provider.send(providerSetup(claims))
       for (const message of queued.splice(0)) provider.send(message)
-      browser.send(JSON.stringify({ type: 'session.ready', user_id: claims.id }))
     })
-    provider.addEventListener('message', event => browser.send(event.data))
-    provider.addEventListener('error', () => { browser.send(JSON.stringify({ type: 'error', code: 'provider_unavailable' })); close(browser, 1011, 'Provider unavailable') })
-    provider.addEventListener('close', () => close(browser, 1000, 'Provider session closed'))
+    provider.addEventListener('message', event => {
+      try {
+        const message = JSON.parse(event.data)
+        if (message.error) {
+          browser.send(JSON.stringify({ type: 'error', code: 'provider_rejected', message: String(message.error.message || 'The live voice provider rejected this session.').slice(0, 240) }))
+          return close(browser, 1011, 'Provider rejected session')
+        }
+        if (message.setupComplete) {
+          setupReady = true
+          return browser.send(JSON.stringify({ type: 'session.ready', user_id: claims.id }))
+        }
+      } catch {}
+      browser.send(event.data)
+    })
+    provider.addEventListener('error', () => { browser.send(JSON.stringify({ type: 'error', code: 'provider_unavailable', message: 'The live voice provider could not be reached.' })); close(browser, 1011, 'Provider unavailable') })
+    provider.addEventListener('close', event => { if (!setupReady) browser.send(JSON.stringify({ type: 'error', code: 'provider_closed', message: 'The live voice provider closed before the session was ready.' })); close(browser, 1000, 'Provider session closed') })
     browser.addEventListener('message', event => {
       if (!allowedMessage(event.data)) return close(browser, 1008, 'Unsupported live message')
       sendProvider(event.data)

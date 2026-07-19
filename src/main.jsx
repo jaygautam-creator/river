@@ -244,7 +244,7 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
     socket.onmessage = event => {
       let payload; try { payload = JSON.parse(event.data) } catch { return }
       if (payload.type === 'session.ready') { startCapture(); return }
-      if (payload.type === 'error') { setVoiceState('error'); setMessage('Live voice provider is unavailable. Try again or use River’s text mode.'); return }
+      if (payload.type === 'error') { setVoiceState('error'); setMessage(payload.message || 'Live voice provider is unavailable. Try again or use River’s text mode.'); return }
       const content = payload.serverContent; if (!content) return
       if (content.interrupted) { clearLivePlayback(); setVoiceState('listening'); setMessage('I’m listening. Go ahead.') }
       if (content.inputTranscription?.text) liveInputRef.current = appendTranscript(liveInputRef.current, content.inputTranscription.text)
