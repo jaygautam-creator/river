@@ -10,6 +10,7 @@
     "test:smoke": "node scripts/smoke-test.mjs",
     "test:memory-eval": "node scripts/memory-eval.mjs",
     "test:load": "node scripts/load-test.mjs",
+    "check:production": "node scripts/production-check.mjs",
     "db:migrate": "node scripts/migrate-postgres.mjs",
     "backup": "node scripts/backup.mjs",
     "restore": "node scripts/restore-backup.mjs",

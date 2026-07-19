@@ -14,8 +14,16 @@ This runbook describes the minimum operating standard for a public River deploym
 1. Set production-only Vercel variables: `DATABASE_URL`, `JWT_SECRET`, `FIELD_ENCRYPTION_KEY`, `GROQ_API_KEY`, `APP_ORIGIN`, and, when email is enabled, `RESEND_API_KEY` and `EMAIL_FROM`.
 2. Use independently generated secrets for `JWT_SECRET` and `FIELD_ENCRYPTION_KEY`; rotate deliberately because rotation invalidates existing sessions or encrypted MFA data.
 3. Confirm `GET /api/readiness` reports database, JWT, field encryption, and model readiness.
-4. Run `npm run build`, `npm run test:smoke`, and `npm audit --audit-level=high` before release.
-5. Review Vercel deployment logs after every production deploy and roll back immediately if readiness fails.
+4. Run the deployment-independent verification after every production release. It deliberately checks only service configuration and never prints secrets:
+
+   ```bash
+   BASE_URL=https://your-river-domain.example \
+   VOICE_GATEWAY_URL=wss://your-live-voice-gateway.example \
+   npm run check:production
+   ```
+
+5. Run `npm run build`, `npm run test:smoke`, and `npm audit --audit-level=high` before release.
+6. Review Vercel deployment logs after every production deploy and roll back immediately if readiness fails.
 
 ## Latency budgets and observability
 
