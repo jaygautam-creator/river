@@ -11,14 +11,15 @@ const delayMs = Math.max(0, Number(process.env.MEMORY_EVAL_DELAY_MS || 13_000))
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 const cases = [
-  { id: 'enduring-project', shouldPropose: true, text: 'I am building a photo journal for my grandmother’s recipes and want to keep working on it this summer.' },
-  { id: 'relationship-concern', shouldPropose: true, text: 'I have been feeling hurt and uncertain because my close friends say I can come across as distant.' },
-  { id: 'upcoming-plan', shouldPropose: true, text: 'I want to plan a two-week trip to Lisbon in late summer, but I do not want every day scheduled.' },
-  { id: 'recurring-wellbeing', shouldPropose: true, text: 'I keep losing sleep before work presentations, and I want to find a steadier routine.' },
-  { id: 'greeting', shouldPropose: false, text: 'Hi River, how are you?' },
-  { id: 'transient-question', shouldPropose: false, text: 'What time is it in London right now?' },
-  { id: 'memory-question', shouldPropose: false, text: 'What do you remember about me?' },
-  { id: 'one-off-preference', shouldPropose: false, text: 'I had pasta for lunch today.' }
+  { id: 'enduring-project', shouldRemember: true, text: 'I am building a photo journal for my grandmother’s recipes and want to keep working on it this summer.' },
+  { id: 'relationship-concern', shouldRemember: true, text: 'I have been feeling hurt and uncertain because my close friends say I can come across as distant.' },
+  { id: 'upcoming-plan', shouldRemember: true, text: 'I want to plan a two-week trip to Lisbon in late summer, but I do not want every day scheduled.' },
+  { id: 'recurring-wellbeing', shouldRemember: true, text: 'I keep losing sleep before work presentations, and I want to find a steadier routine.' },
+  { id: 'multiple-hobbies', shouldRemember: true, minimumMemories: 2, text: 'I play cricket most weekends and I also enjoy chess with my brother.' },
+  { id: 'greeting', shouldRemember: false, text: 'Hi River, how are you?' },
+  { id: 'transient-question', shouldRemember: false, text: 'What time is it in London right now?' },
+  { id: 'memory-question', shouldRemember: false, text: 'What do you remember about me?' },
+  { id: 'one-off-preference', shouldRemember: false, text: 'I had pasta for lunch today.' }
 ]
 
 const timings = []
@@ -55,23 +56,26 @@ try {
     const thread = await request('/api/threads', { method: 'POST', headers, body: JSON.stringify({ title: `Evaluation: ${testCase.id}` }) })
     await pauseForProvider()
     const result = await request('/api/chat', { method: 'POST', headers, body: JSON.stringify({ thread_id: thread.thread.id, content: testCase.text }) })
-    outcomes.push({ ...testCase, proposed: Boolean(result.proposal?.id), provider: result.provider, topic: result.proposal?.topic || null })
+    const remembered = Array.isArray(result.storylines) ? result.storylines : []
+    const pending = Array.isArray(result.proposals) ? result.proposals : []
+    const createdCount = remembered.length + pending.length
+    outcomes.push({ ...testCase, remembered: remembered.length, proposed: pending.length, createdCount, detected: createdCount >= (testCase.minimumMemories || 1), provider: result.provider, topics: [...remembered, ...pending].map(memory => memory.topic) })
   }
 } catch (error) {
   executionError = error.message
 }
 
 const totals = outcomes.reduce((metrics, outcome) => {
-  if (outcome.shouldPropose && outcome.proposed) metrics.truePositive += 1
-  if (!outcome.shouldPropose && outcome.proposed) metrics.falsePositive += 1
-  if (outcome.shouldPropose && !outcome.proposed) metrics.falseNegative += 1
+  if (outcome.shouldRemember && outcome.detected) metrics.truePositive += 1
+  if (!outcome.shouldRemember && outcome.detected) metrics.falsePositive += 1
+  if (outcome.shouldRemember && !outcome.detected) metrics.falseNegative += 1
   return metrics
 }, { truePositive: 0, falsePositive: 0, falseNegative: 0 })
 const precision = totals.truePositive / Math.max(1, totals.truePositive + totals.falsePositive)
 const recall = totals.truePositive / Math.max(1, totals.truePositive + totals.falseNegative)
 const f1 = (2 * precision * recall) / Math.max(0.0001, precision + recall)
 
-let crossThreadRecall = { proposal_created: false, answer: null, passed: false, skipped: Boolean(executionError) }
+let crossThreadRecall = { memory_created: false, answer: null, passed: false, skipped: Boolean(executionError) }
 if (!executionError) {
   try {
     const account = await signup('Recall evaluation', 'memory-recall')
@@ -80,11 +84,12 @@ if (!executionError) {
     const source = 'I am building a photo journal for my grandmother’s recipes and want to keep working on it this summer.'
     await pauseForProvider()
     const sourceResult = await request('/api/chat', { method: 'POST', headers, body: JSON.stringify({ thread_id: firstThread.thread.id, content: source }) })
+    const sourceMemoryCreated = (sourceResult.storylines || []).length > 0 || (sourceResult.proposals || []).length > 0
     if (sourceResult.proposal?.id) await request(`/api/memory/proposals/${sourceResult.proposal.id}/approve`, { method: 'POST', headers, body: '{}' })
     const secondThread = await request('/api/threads', { method: 'POST', headers, body: JSON.stringify({ title: 'A new conversation' }) })
     await pauseForProvider()
     const recallResult = await request('/api/chat', { method: 'POST', headers, body: JSON.stringify({ thread_id: secondThread.thread.id, content: 'What do you remember from our previous conversation about my project?' }) })
-    crossThreadRecall = { proposal_created: Boolean(sourceResult.proposal?.id), answer: recallResult.reply, passed: Boolean(sourceResult.proposal?.id) && /(photo journal|grandmother|recipe)/i.test(recallResult.reply || ''), skipped: false }
+    crossThreadRecall = { memory_created: sourceMemoryCreated, answer: recallResult.reply, passed: sourceMemoryCreated && /(photo journal|grandmother|recipe)/i.test(recallResult.reply || ''), skipped: false }
   } catch (error) {
     executionError = error.message
     crossThreadRecall = { ...crossThreadRecall, skipped: true }
