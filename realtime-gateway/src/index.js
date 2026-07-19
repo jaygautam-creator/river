@@ -47,7 +47,10 @@ function providerSetup(claims) {
       responseModalities: ['AUDIO'],
       inputAudioTranscription: {},
       outputAudioTranscription: {},
-      realtimeInputConfig: { automaticActivityDetection: { endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH', prefixPaddingMs: 180, silenceDurationMs: 700 } },
+      // Gemini Live enables server-side automatic activity detection by
+      // default. Keep the setup minimal until the session is established;
+      // provider-side turn tuning can be added back after compatibility is
+      // verified instead of relying on a browser-side silence timer.
       systemInstruction: { parts: [{ text: `You are River, a warm, concise AI companion for ${claims.name || 'the user'}. Respect the user’s boundaries. Never claim memories you have not been given. If there is immediate danger, encourage emergency services and trusted human support.${memory}` }] }
     }
   })
@@ -105,6 +108,14 @@ export default {
     })
     provider.addEventListener('error', () => { browser.send(JSON.stringify({ type: 'error', code: 'provider_unavailable', message: 'The live voice provider could not be reached.' })); close(browser, 1011, 'Provider unavailable') })
     provider.addEventListener('close', event => {
+      // Keep the provider's diagnostic in Worker logs only. It can help
+      // diagnose a rejected setup without exposing implementation details or
+      // credentials to the browser.
+      console.warn('Gemini Live provider closed', {
+        setupReady,
+        code: event.code,
+        reason: String(event.reason || '').slice(0, 160)
+      })
       if (!setupReady) {
         // Do not expose credentials or provider payloads. The close code is
         // enough to distinguish an unavailable service from a rejected setup
