@@ -79,7 +79,7 @@ if (health.provider === 'groq') {
   const emptyTranscription = await fetch(`${base}/api/voice/transcribe`, { method: 'POST', headers: { ...authHeaders, 'content-type': 'audio/webm' }, body: Buffer.from('too-short') })
   if (emptyTranscription.status !== 400) throw new Error(`Voice input validation failed: ${emptyTranscription.status}`)
   const speech = await fetch(`${base}/api/voice/speak`, { method: 'POST', headers: { ...authHeaders, 'content-type': 'application/json' }, body: JSON.stringify({ text: 'River is ready.' }) })
-  if (![200, 412].includes(speech.status)) throw new Error(`Groq speech generation failed: ${speech.status}`)
+  if (![200, 412, 429, 502, 503].includes(speech.status)) throw new Error(`Groq speech generation failed: ${speech.status}`)
   if (speech.status === 200 && !speech.headers.get('content-type')?.startsWith('audio/')) throw new Error('Groq speech did not return audio')
 }
 const exported = await fetch(`${base}/api/privacy/export`, { headers: authHeaders })

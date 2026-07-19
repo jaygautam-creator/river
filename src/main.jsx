@@ -175,7 +175,7 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
   // an opt-in beta while the streaming provider learns the room.
   const [turnMode, setTurnMode] = useState('tap')
   const [message, setMessage] = useState('Start reliable voice, then hold to talk. Hands-free beta is available when you want to try it.')
-  const streamRef = useRef(null), audioRef = useRef(null), recorderRef = useRef(null), audioUrlRef = useRef(null), speechAbortRef = useRef(null)
+  const streamRef = useRef(null), audioRef = useRef(null), recorderRef = useRef(null), audioUrlRef = useRef(null), speechAbortRef = useRef(null), deviceSpeechTimerRef = useRef(null)
   const contextRef = useRef(null), analyserRef = useRef(null), monitorRef = useRef(null), recognitionRef = useRef(null), conversationRef = useRef(false)
   const liveSocketRef = useRef(null), liveProcessorRef = useRef(null), liveInputSourceRef = useRef(null), liveSourcesRef = useRef(new Set()), liveNextPlaybackRef = useRef(0), liveInputRef = useRef(''), liveOutputRef = useRef(''), liveReconnectAttemptsRef = useRef(0), liveReconnectTimerRef = useRef(null), liveReadyTimerRef = useRef(null), liveActiveRef = useRef(false)
   const [liveActive, setLiveActive] = useState(false)
@@ -189,6 +189,8 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
   const clearLivePlayback = () => { liveSourcesRef.current.forEach(source => { try { source.stop() } catch {} }); liveSourcesRef.current.clear(); liveNextPlaybackRef.current = contextRef.current?.currentTime || 0 }
   const stop = () => {
     conversationRef.current = false; turnNonceRef.current += 1; clearMonitor(); clearLiveReadyTimer(); stopRecognition(); speechAbortRef.current?.abort(); speechAbortRef.current = null; if (liveReconnectTimerRef.current) window.clearTimeout(liveReconnectTimerRef.current); liveReconnectTimerRef.current = null; liveReconnectAttemptsRef.current = 0; liveActiveRef.current = false; setLiveActive(false)
+    if (deviceSpeechTimerRef.current) window.clearTimeout(deviceSpeechTimerRef.current); deviceSpeechTimerRef.current = null
+    try { window.speechSynthesis?.cancel() } catch {}
     try { liveSocketRef.current?.close(1000, 'River voice session ended') } catch {} liveSocketRef.current = null
     try { liveProcessorRef.current?.disconnect() } catch {} liveProcessorRef.current = null
     try { liveInputSourceRef.current?.disconnect() } catch {} liveInputSourceRef.current = null; clearLivePlayback()
@@ -329,15 +331,34 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
       } else { setVoiceState('error'); setMessage('Live voice disconnected. Try again, or use reliable press-to-talk voice.') }
     }
   }
+  const resumeAfterReply = () => {
+    if (!conversationRef.current) return
+    if (turnModeRef.current === 'tap') { setVoiceState('ready'); setMessage('Hold to talk when you are ready for your next turn.') }
+    else beginListening(false)
+  }
+  const speakWithDeviceVoice = text => {
+    if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance || !String(text || '').trim()) return false
+    try {
+      if (deviceSpeechTimerRef.current) window.clearTimeout(deviceSpeechTimerRef.current)
+      window.speechSynthesis.cancel()
+      const utterance = new window.SpeechSynthesisUtterance(String(text).trim())
+      utterance.lang = navigator.language || 'en-US'; utterance.rate = 0.98
+      utterance.onend = () => { if (deviceSpeechTimerRef.current) window.clearTimeout(deviceSpeechTimerRef.current); deviceSpeechTimerRef.current = null; resumeAfterReply() }
+      utterance.onerror = () => { if (deviceSpeechTimerRef.current) window.clearTimeout(deviceSpeechTimerRef.current); deviceSpeechTimerRef.current = null; setVoiceState(turnModeRef.current === 'tap' ? 'ready' : 'listening'); setMessage('River replied in text, but this browser could not speak it. You can continue talking or use text.') }
+      window.speechSynthesis.speak(utterance)
+      setVoiceState('speaking'); setMessage('River is replying with your device voice…')
+      deviceSpeechTimerRef.current = window.setTimeout(() => {
+        if (stateRef.current !== 'speaking' || window.speechSynthesis.speaking || window.speechSynthesis.pending) return
+        setVoiceState(turnModeRef.current === 'tap' ? 'ready' : 'listening'); setMessage('River replied in text. Your device voice was unavailable, so you can continue by voice or text.')
+      }, 2500)
+      return true
+    } catch { return false }
+  }
   const playCurrentReply = async () => {
     if (!audioRef.current?.src) throw new Error('River’s audio reply is no longer available. Please speak again.')
     audioRef.current.onended = () => {
       if (!conversationRef.current) return
-      // Never reopen the microphone after a reliable push-to-talk turn. This
-      // prevents River from replying to room noise or a person's next thought
-      // before they have deliberately started another turn.
-      if (turnModeRef.current === 'tap') { setVoiceState('ready'); setMessage('Hold to talk when you are ready for your next turn.') }
-      else beginListening(false)
+      resumeAfterReply()
     }
     audioRef.current.onerror = () => { setVoiceState('awaiting-playback'); setMessage('River created a reply, but your browser could not play it. Check tab sound, then try again or continue by text.') }
     await audioRef.current.play(); setVoiceState('speaking'); setMessage('River is speaking. Start a sustained sentence to interrupt.')
@@ -356,7 +377,19 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
       const speechStartedAt = Date.now(); setMessage('Preparing River’s reply…'); speechAbortRef.current = new AbortController()
       const csrf = document.cookie.split('; ').find(value => value.startsWith('river_csrf='))?.split('=')[1]
       const speech = await fetch('/api/voice/speak', { method: 'POST', credentials: 'include', signal: speechAbortRef.current.signal, headers: { 'Content-Type': 'application/json', ...(csrf ? { 'X-CSRF-Token': csrf } : {}) }, body: JSON.stringify({ text: reply }) })
-      if (!speech.ok) { const data = await speech.json().catch(() => ({})); throw new Error(data.error || 'River could not create spoken audio.') }
+      if (!speech.ok) {
+        const data = await speech.json().catch(() => ({}))
+        metric('speech', speechStartedAt, 'provider_fallback')
+        // The text reply is already safely stored and visible. Do not turn a
+        // temporary TTS provider failure into a broken conversation; use the
+        // person's device voice when available, then preserve text as fallback.
+        if (!speakWithDeviceVoice(reply)) {
+          setVoiceState(turnModeRef.current === 'tap' ? 'ready' : 'listening')
+          setMessage(`${data.error || 'River could not create spoken audio.'} You can continue by voice or text.`)
+          if (turnModeRef.current !== 'tap') beginListening(false)
+        }
+        return
+      }
       const audio = await speech.blob(); metric('speech', speechStartedAt)
       if (!conversationRef.current || nonce !== turnNonceRef.current) return
       discardAudio(); audioUrlRef.current = URL.createObjectURL(audio); audioRef.current.src = audioUrlRef.current
@@ -399,7 +432,11 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
           if (now - speechOnsetRef.current >= 180) { heardSpeechRef.current = true; lastSpeechRef.current = now }
         } else speechOnsetRef.current = 0
         const sustainedInterruption = currentVolume > Math.max(threshold * 1.75, noiseFloorRef.current + 4) && speechOnsetRef.current && now - speechOnsetRef.current >= 700
-        if (stateRef.current === 'speaking' && sustainedInterruption) { metric('turn', turnStartedRef.current, 'interrupted'); speechAbortRef.current?.abort(); discardAudio(); beginListening(false); return }
+        if (stateRef.current === 'speaking' && sustainedInterruption) {
+          metric('turn', turnStartedRef.current, 'interrupted'); speechAbortRef.current?.abort(); discardAudio(); try { window.speechSynthesis?.cancel() } catch {}
+          if (turnModeRef.current === 'tap') { setVoiceState('ready'); setMessage('River stopped. Hold to talk when you are ready.') } else beginListening(false)
+          return
+        }
         if (stateRef.current === 'listening' && !manualTurnRef.current && heardSpeechRef.current && now - turnStartedRef.current >= 1000 && now - lastSpeechRef.current > pauseForCurrentTurn()) recorderRef.current?.stop()
       }, 80)
       if (mode === 'handsfree') beginListening(false)
