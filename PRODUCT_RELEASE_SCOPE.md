@@ -7,14 +7,14 @@ River is ready for a focused product build, not a public launch.
 Make the core loop feel complete:
 
 1. A person can start or continue a conversation without losing context.
-2. River responds naturally using only approved, relevant memories.
-3. New memories are proposed clearly and require user control.
+2. River responds naturally using relevant conversation context and the person's own relevant memories.
+3. River automatically retains clear, non-sensitive, high-confidence details while keeping sensitive or uncertain memories reviewable and editable.
 4. People can find, edit, delete, and export their conversations and memories.
 5. Voice feels like the same River thread, with clear permission and recovery states.
 
 ## Product gates
 
-- Structured memory proposals with confidence, provenance, deduplication, and approval.
+- Structured multi-memory extraction with confidence, provenance, deduplication, automatic storage for clear everyday facts, and review for sensitive or uncertain facts.
 - Multiple conversation threads with names, timestamps, switching, and deletion.
 - Search across messages and approved memories.
 - Real model responses with resilient local fallback.
