@@ -21,6 +21,12 @@ for (const [name, source, expected] of [
   ['live voice setup deadline', client, 'liveReadyTimerRef'],
   ['voice press-to-talk fallback', client, 'Press to talk'],
   ['voice recovery fallback', client, 'Use reliable voice'],
+  ['shared IP rate limiter', api, 'rate_limit_buckets'],
+  ['privacy-hashed abuse key', api, 'const clientFingerprint'],
+  ['daily AI quota guard', api, 'const quota = (category, envName, fallback)'],
+  ['owner analytics secret guard', api, 'const ownerAuthorized'],
+  ['content-free aggregate usage response', api, 'Aggregated operational metrics only'],
+  ['Turnstile server verifier', api, 'challenges.cloudflare.com/turnstile/v0/siteverify'],
   ['dialog accessible names', client, 'aria-modal="true"'],
   ['visible keyboard focus', css, 'button:focus-visible']
 ]) assert.ok(source.includes(expected), `Missing regression contract: ${name}`)

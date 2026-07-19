@@ -20,3 +20,13 @@ Vercel logs are River's current production monitoring surface. Configure these b
 | Client interaction | p75 INP exceeds 300 ms after excluding network waits |
 
 These thresholds are operational starting points, not an SLO claim. River needs a sustained production traffic baseline before formal service objectives are set.
+# Vercel monitoring setup
+
+River emits content-free structured request logs. Configure Vercel alerts before sharing the public URL:
+
+1. In Vercel **Logs**, save filters for `status >= 500`, `status = 429`, and the `/api/readiness` route.
+2. Create alerts for a sustained 5xx increase, repeated readiness failures, and a material spike in 429 responses. Send them to an owner-controlled email or notification channel.
+3. Review logs after the first public traffic window. Never copy request bodies, cookies, Authorization headers, emails, or transcripts into an issue tracker.
+4. Use the protected `/api/internal/usage` endpoint for aggregate adoption/cost signals. It intentionally excludes conversation content and direct identifiers.
+
+This is baseline operational monitoring, not a substitute for an external error-monitoring product, on-call rotation, or a formal incident-response program.

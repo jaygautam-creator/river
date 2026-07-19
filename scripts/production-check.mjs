@@ -19,6 +19,10 @@ const requiredChecks = ['database', 'jwt_secret', 'field_encryption', 'model']
 const missingChecks = requiredChecks.filter(check => !readiness.checks?.[check])
 if (missingChecks.length) throw new Error(`Required readiness checks failed: ${missingChecks.join(', ')}`)
 
+if (process.env.REQUIRE_TURNSTILE === 'true' && !readiness.checks?.turnstile) {
+  throw new Error('Turnstile is required for this release but is not configured.')
+}
+
 if (voiceGatewayUrl) {
   const gateway = await readJson(`${voiceGatewayUrl}/health`, 'Live voice gateway health check')
   if (!gateway.ok) throw new Error('Live voice gateway reported unhealthy')
