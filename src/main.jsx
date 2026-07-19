@@ -170,13 +170,16 @@ function TodayPanel({ reminders, storylines, onClose, onOpenMemory }) {
 
 function VoiceScreen({ onBack, onSend, onLiveTurn }) {
   const [state, setState] = useState('idle')
-  const [turnMode, setTurnMode] = useState('handsfree')
-  const [message, setMessage] = useState('Start once. River listens for a sustained voice, waits for a natural pause, then responds.')
+  // Press-to-talk is the safe default: an unfinished sentence must never be
+  // treated as permission for River to speak. Hands-free remains available as
+  // an opt-in beta while the streaming provider learns the room.
+  const [turnMode, setTurnMode] = useState('tap')
+  const [message, setMessage] = useState('Start reliable voice, then hold to talk. Hands-free beta is available when you want to try it.')
   const streamRef = useRef(null), audioRef = useRef(null), recorderRef = useRef(null), audioUrlRef = useRef(null), speechAbortRef = useRef(null)
   const contextRef = useRef(null), analyserRef = useRef(null), monitorRef = useRef(null), recognitionRef = useRef(null), conversationRef = useRef(false)
   const liveSocketRef = useRef(null), liveProcessorRef = useRef(null), liveInputSourceRef = useRef(null), liveSourcesRef = useRef(new Set()), liveNextPlaybackRef = useRef(0), liveInputRef = useRef(''), liveOutputRef = useRef(''), liveReconnectAttemptsRef = useRef(0), liveReconnectTimerRef = useRef(null), liveReadyTimerRef = useRef(null), liveActiveRef = useRef(false)
   const [liveActive, setLiveActive] = useState(false)
-  const stateRef = useRef('idle'), heardSpeechRef = useRef(false), lastSpeechRef = useRef(0), speechOnsetRef = useRef(0), turnStartedRef = useRef(0), noiseFloorRef = useRef(2.2), interimRef = useRef(''), turnNonceRef = useRef(0), manualTurnRef = useRef(false)
+  const stateRef = useRef('idle'), heardSpeechRef = useRef(false), lastSpeechRef = useRef(0), speechOnsetRef = useRef(0), turnStartedRef = useRef(0), noiseFloorRef = useRef(2.2), interimRef = useRef(''), transcriptChangedAtRef = useRef(0), finalTranscriptAtRef = useRef(0), turnModeRef = useRef('tap'), turnNonceRef = useRef(0), manualTurnRef = useRef(false)
   const setVoiceState = value => { stateRef.current = value; setState(value) }
   const metric = (stage, startedAt, outcome = 'ok') => { if (startedAt) void api('/api/telemetry/voice', { method: 'POST', body: JSON.stringify({ stage, duration_ms: Date.now() - startedAt, outcome }) }).catch(() => {}) }
   const clearMonitor = () => { if (monitorRef.current) window.clearInterval(monitorRef.current); monitorRef.current = null }
@@ -206,15 +209,33 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
     if (!Recognition) return
     try {
       const recognition = new Recognition(); recognition.continuous = true; recognition.interimResults = true; recognition.lang = navigator.language || 'en-US'
-      recognition.onresult = event => { interimRef.current = Array.from(event.results).map(result => result[0]?.transcript || '').join(' ').trim() }
-      recognition.onerror = () => {}; recognitionRef.current = recognition; recognition.start()
+      recognition.onresult = event => {
+        const transcript = Array.from(event.results).map(result => result[0]?.transcript || '').join(' ').trim()
+        if (transcript && transcript !== interimRef.current) { interimRef.current = transcript; transcriptChangedAtRef.current = Date.now() }
+        if (Array.from(event.results).some(result => result.isFinal)) finalTranscriptAtRef.current = Date.now()
+      }
+      recognition.onerror = () => {}
+      recognition.onend = () => {
+        if (recognitionRef.current !== recognition) return
+        recognitionRef.current = null
+        // Some browsers end recognition between phrases. Keep awareness alive
+        // only during a hands-free local turn; manual mode is deliberately
+        // controlled by the person holding the button.
+        if (conversationRef.current && stateRef.current === 'listening' && !manualTurnRef.current) window.setTimeout(startInterimAwareness, 220)
+      }
+      recognitionRef.current = recognition; recognition.start()
     } catch {}
   }
   const pauseForCurrentTurn = () => {
+    const now = Date.now()
     const words = interimRef.current.trim().split(/\s+/).filter(Boolean).length
     const soundsIncomplete = words >= 4 && !/[.!?]$/.test(interimRef.current.trim())
-    const shortTurn = Date.now() - turnStartedRef.current < 1200
-    return Math.max(shortTurn ? 1050 : 820, soundsIncomplete ? 1400 : 0)
+    const shortTurn = now - turnStartedRef.current < 1800
+    const transcriptStillChanging = transcriptChangedAtRef.current && now - transcriptChangedAtRef.current < 700
+    const lacksFinalRecognition = words > 0 && (!finalTranscriptAtRef.current || now - finalTranscriptAtRef.current > 2200)
+    // This is an evidence gate, not one fixed silence timer. A short or still
+    // forming utterance gets more room than a stable, completed thought.
+    return Math.max(1250, shortTurn ? 1750 : 0, words < 4 ? 1850 : 0, soundsIncomplete ? 1950 : 0, transcriptStillChanging ? 1750 : 0, lacksFinalRecognition ? 1600 : 0)
   }
   const appendTranscript = (current, next) => {
     const value = String(next || '').trim()
@@ -286,7 +307,7 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
         try { socket.close(1011, 'River live voice provider error') } catch {}
         conversationRef.current = false
         setVoiceState('connecting'); setMessage('Live voice is unavailable right now. Switching to reliable voice…')
-        window.setTimeout(() => { void begin({ skipLive: true, mode: turnMode }) }, 0)
+        window.setTimeout(() => { void begin({ skipLive: true, mode: 'tap' }) }, 0)
         return
       }
       const content = payload.serverContent; if (!content) return
@@ -310,7 +331,14 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
   }
   const playCurrentReply = async () => {
     if (!audioRef.current?.src) throw new Error('River’s audio reply is no longer available. Please speak again.')
-    audioRef.current.onended = () => { if (conversationRef.current) beginListening(false) }
+    audioRef.current.onended = () => {
+      if (!conversationRef.current) return
+      // Never reopen the microphone after a reliable push-to-talk turn. This
+      // prevents River from replying to room noise or a person's next thought
+      // before they have deliberately started another turn.
+      if (turnModeRef.current === 'tap') { setVoiceState('ready'); setMessage('Hold to talk when you are ready for your next turn.') }
+      else beginListening(false)
+    }
     audioRef.current.onerror = () => { setVoiceState('awaiting-playback'); setMessage('River created a reply, but your browser could not play it. Check tab sound, then try again or continue by text.') }
     await audioRef.current.play(); setVoiceState('speaking'); setMessage('River is speaking. Start a sustained sentence to interrupt.')
   }
@@ -341,7 +369,7 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
   const beginListening = (manual = false) => {
     if (!conversationRef.current || !streamRef.current || recorderRef.current?.state === 'recording') return
     const chunks = []; const recorder = new MediaRecorder(streamRef.current); const nonce = ++turnNonceRef.current; const captureStartedAt = Date.now(); recorderRef.current = recorder
-    manualTurnRef.current = manual; heardSpeechRef.current = false; lastSpeechRef.current = captureStartedAt; speechOnsetRef.current = 0; turnStartedRef.current = captureStartedAt; interimRef.current = ''
+    manualTurnRef.current = manual; heardSpeechRef.current = false; lastSpeechRef.current = captureStartedAt; speechOnsetRef.current = 0; turnStartedRef.current = captureStartedAt; interimRef.current = ''; transcriptChangedAtRef.current = 0; finalTranscriptAtRef.current = 0
     if (!manual) startInterimAwareness()
     recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data) }
     recorder.onerror = () => { setVoiceState('error'); setMessage('Your microphone recording stopped unexpectedly. Try reconnecting voice.') }
@@ -349,7 +377,8 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
     recorder.start(250); setVoiceState('listening'); setMessage(manual ? 'Listening while you hold the button…' : 'Listening… River will wait for a natural pause.')
   }
   const stopManualTurn = () => { if (manualTurnRef.current && recorderRef.current?.state === 'recording') { heardSpeechRef.current = true; recorderRef.current.stop() } }
-  const begin = async ({ skipLive = false, mode = turnMode } = {}) => {
+  const begin = async ({ skipLive = true, mode = turnModeRef.current } = {}) => {
+    turnModeRef.current = mode; setTurnMode(mode)
     setVoiceState('connecting'); setMessage('Checking your microphone permission…')
     try {
       const live = skipLive ? null : await api('/api/voice/live/session').catch(() => null)
@@ -369,9 +398,9 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
           if (!speechOnsetRef.current) speechOnsetRef.current = now
           if (now - speechOnsetRef.current >= 180) { heardSpeechRef.current = true; lastSpeechRef.current = now }
         } else speechOnsetRef.current = 0
-        const sustainedInterruption = currentVolume > Math.max(threshold * 1.75, noiseFloorRef.current + 4) && speechOnsetRef.current && now - speechOnsetRef.current >= 460
+        const sustainedInterruption = currentVolume > Math.max(threshold * 1.75, noiseFloorRef.current + 4) && speechOnsetRef.current && now - speechOnsetRef.current >= 700
         if (stateRef.current === 'speaking' && sustainedInterruption) { metric('turn', turnStartedRef.current, 'interrupted'); speechAbortRef.current?.abort(); discardAudio(); beginListening(false); return }
-        if (stateRef.current === 'listening' && !manualTurnRef.current && heardSpeechRef.current && now - turnStartedRef.current >= 520 && now - lastSpeechRef.current > pauseForCurrentTurn()) recorderRef.current?.stop()
+        if (stateRef.current === 'listening' && !manualTurnRef.current && heardSpeechRef.current && now - turnStartedRef.current >= 1000 && now - lastSpeechRef.current > pauseForCurrentTurn()) recorderRef.current?.stop()
       }, 80)
       if (mode === 'handsfree') beginListening(false)
       else { setVoiceState('ready'); setMessage('Press and hold the button while you speak. Release it when you are done.') }
@@ -379,9 +408,45 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
   }
   const replay = async () => { try { await playCurrentReply() } catch { setMessage('Audio is still blocked. Check this tab’s sound/autoplay permission, then try again.') } }
   const restart = options => { stop(); void begin(options) }
-  const switchMode = next => { setTurnMode(next); if (!conversationRef.current) return; if (liveSocketRef.current || liveActiveRef.current) { if (next === 'tap') { restart({ skipLive: true, mode: 'tap' }); return } setMessage('Live voice is listening continuously for your next thought.'); return } if (recorderRef.current?.state === 'recording') recorderRef.current.stop(); if (next === 'handsfree') beginListening(false); else { setVoiceState('ready'); setMessage('Press and hold the button while you speak. Release it when you are done.') } }
+  const switchMode = next => {
+    turnModeRef.current = next; setTurnMode(next)
+    if (next === 'handsfree') {
+      // Hands-free uses the provider's streaming VAD and is explicitly opt-in.
+      // Starting a fresh session avoids carrying a partially recorded turn.
+      if (!liveActiveRef.current) { restart({ skipLive: false, mode: 'handsfree' }); return }
+      setMessage('Hands-free beta is listening continuously. Switch to press-to-talk in noisy spaces.'); return
+    }
+    if (liveSocketRef.current || liveActiveRef.current) { restart({ skipLive: true, mode: 'tap' }); return }
+    if (!conversationRef.current) return
+    if (recorderRef.current?.state === 'recording') recorderRef.current.stop()
+    setVoiceState('ready'); setMessage('Press and hold the button while you speak. Release it when you are done.')
+  }
   const canManualTurn = !liveActive && conversationRef.current && turnMode === 'tap' && ['ready', 'listening'].includes(state)
-  return <div className="voice-screen"><button className="back-link" onClick={() => { stop(); onBack() }}>← back to text</button><div className="voice-screen-inner"><audio ref={audioRef} /><div className={`voice-breathe ${state === 'listening' ? 'recording' : ''}`}><div className="breathe-ring ring-a" /><div className="breathe-ring ring-b" /><div className="voice-center"><Mic size={30} /></div></div><div className="eyebrow centered"><span className="eyebrow-dot" /> {liveActive ? 'live voice mode' : 'adaptive voice mode'}</div><h2>Talk naturally.</h2><p>River listens for sustained speech, respects a real pause, and only then responds.</p><div className="voice-mode-control" role="group" aria-label="Voice input mode"><button className={turnMode === 'handsfree' ? 'active' : ''} onClick={() => switchMode('handsfree')}>Hands-free</button><button className={turnMode === 'tap' ? 'active' : ''} onClick={() => switchMode('tap')}>{liveActive ? 'Use reliable voice' : 'Press to talk'}</button></div><div className="voice-note"><Headphones size={16} /><span>{message}</span></div>{state === 'idle' || state === 'error' ? <div className="voice-recovery"><button className="ghost-button voice-start" onClick={() => restart()} disabled={state === 'connecting'}><Mic size={14} /> {state === 'error' ? 'Try live voice again' : 'Start conversation'}</button>{state === 'error' && <button className="save-button voice-start" onClick={() => { setTurnMode('tap'); restart({ skipLive: true, mode: 'tap' }) }}><Mic size={14} /> Use reliable voice</button>}</div> : <div className="voice-actions">{canManualTurn && <button className="save-button voice-start hold-to-talk" onPointerDown={() => beginListening(true)} onPointerUp={stopManualTurn} onPointerCancel={stopManualTurn} onPointerLeave={event => { if (event.buttons) stopManualTurn() }}><Mic size={14} /> Hold to talk</button>}{state === 'awaiting-playback' && <button className="save-button voice-start" onClick={replay}><Headphones size={14} /> Play River’s reply</button>}<button className="ghost-button voice-start" onClick={stop}><X size={14} /> End conversation</button></div>}</div></div>
+  return <div className="voice-screen">
+    <button className="back-link" onClick={() => { stop(); onBack() }}>← back to text</button>
+    <div className="voice-screen-inner">
+      <audio ref={audioRef} />
+      <div className={`voice-breathe ${state === 'listening' ? 'recording' : ''}`}><div className="breathe-ring ring-a" /><div className="breathe-ring ring-b" /><div className="voice-center"><Mic size={30} /></div></div>
+      <div className="eyebrow centered"><span className="eyebrow-dot" /> {liveActive ? 'live voice mode' : 'reliable voice mode'}</div>
+      <h2>Talk naturally.</h2>
+      <p>River waits for a complete thought. In a noisy space, press-to-talk keeps you in control.</p>
+      <div className="voice-mode-control" role="group" aria-label="Voice input mode">
+        <button className={turnMode === 'tap' ? 'active' : ''} onClick={() => switchMode('tap')}>Press to talk</button>
+        <button className={turnMode === 'handsfree' ? 'active' : ''} onClick={() => switchMode('handsfree')}>Hands-free beta</button>
+      </div>
+      <div className="voice-note"><Headphones size={16} /><span>{message}</span></div>
+      {state === 'idle' || state === 'error'
+        ? <div className="voice-recovery">
+            <button className="save-button voice-start" onClick={() => restart({ skipLive: true, mode: 'tap' })} disabled={state === 'connecting'}><Mic size={14} /> {state === 'error' ? 'Try reliable voice again' : 'Start reliable voice'}</button>
+            <button className="ghost-button voice-start" onClick={() => restart({ skipLive: false, mode: 'handsfree' })} disabled={state === 'connecting'}><Mic size={14} /> Try hands-free beta</button>
+          </div>
+        : <div className="voice-actions">
+            {canManualTurn && <button className="save-button voice-start hold-to-talk" onPointerDown={() => beginListening(true)} onPointerUp={stopManualTurn} onPointerCancel={stopManualTurn} onPointerLeave={event => { if (event.buttons) stopManualTurn() }} onKeyDown={event => { if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) beginListening(true) }} onKeyUp={event => { if (event.key === ' ' || event.key === 'Enter') stopManualTurn() }}><Mic size={14} /> Hold to talk</button>}
+            {state === 'awaiting-playback' && <button className="save-button voice-start" onClick={replay}><Headphones size={14} /> Play River’s reply</button>}
+            <button className="ghost-button voice-start" onClick={stop}><X size={14} /> End conversation</button>
+          </div>}
+    </div>
+  </div>
 }
 
 function SearchPanel({ onClose, onSelectThread }) {
