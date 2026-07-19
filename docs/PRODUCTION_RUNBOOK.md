@@ -22,7 +22,7 @@ This runbook describes the minimum operating standard for a public River deploym
    npm run check:production
    ```
 
-5. Run `npm run build`, `npm run test:smoke`, and `npm audit --audit-level=high` before release.
+5. Run `npm run check:regression`, `npm run build`, `npm run test:smoke`, and `npm audit --audit-level=high` before release. The local smoke command checks the SQLite demo stack; use the retained deployed evaluator and load-test artifacts for Postgres production evidence.
 6. Review Vercel deployment logs after every production deploy and roll back immediately if readiness fails.
 
 ## Latency budgets and observability

@@ -46,6 +46,7 @@ const accountHeaders = account => ({ Authorization: `Bearer ${account.token}`, '
 const uniqueEmail = prefix => `${prefix}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}@river.local`
 const signup = async (name, prefix) => request('/api/auth/signup', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, email: uniqueEmail(prefix), password: 'memory-evaluation-password' }) })
 const pauseForProvider = async () => { if (delayMs) await sleep(delayMs) }
+const approvePending = async (result, headers) => Promise.all((result.proposals || []).map(proposal => request(`/api/memory/proposals/${proposal.id}/approve`, { method: 'POST', headers, body: '{}' })))
 
 const outcomes = []
 let executionError = null
@@ -85,7 +86,7 @@ if (!executionError) {
     await pauseForProvider()
     const sourceResult = await request('/api/chat', { method: 'POST', headers, body: JSON.stringify({ thread_id: firstThread.thread.id, content: source }) })
     const sourceMemoryCreated = (sourceResult.storylines || []).length > 0 || (sourceResult.proposals || []).length > 0
-    if (sourceResult.proposal?.id) await request(`/api/memory/proposals/${sourceResult.proposal.id}/approve`, { method: 'POST', headers, body: '{}' })
+    await approvePending(sourceResult, headers)
     const secondThread = await request('/api/threads', { method: 'POST', headers, body: JSON.stringify({ title: 'A new conversation' }) })
     await pauseForProvider()
     const recallResult = await request('/api/chat', { method: 'POST', headers, body: JSON.stringify({ thread_id: secondThread.thread.id, content: 'What do you remember from our previous conversation about my project?' }) })
@@ -96,19 +97,42 @@ if (!executionError) {
   }
 }
 
+let crossThreadPreferenceRecall = { memories_created: false, answer: null, passed: false, skipped: Boolean(executionError) }
+if (!executionError) {
+  try {
+    const account = await signup('Preference recall evaluation', 'memory-preference-recall')
+    const headers = accountHeaders(account)
+    const firstThread = await request('/api/threads', { method: 'POST', headers, body: JSON.stringify({ title: 'Interests' }) })
+    const source = 'I play cricket most weekends, and I also enjoy chess with my brother.'
+    await pauseForProvider()
+    const sourceResult = await request('/api/chat', { method: 'POST', headers, body: JSON.stringify({ thread_id: firstThread.thread.id, content: source }) })
+    await approvePending(sourceResult, headers)
+    const approved = await request('/api/memory', { headers })
+    const preferenceCount = (approved.storylines || []).filter(memory => memory.memory_kind === 'preference').length
+    const secondThread = await request('/api/threads', { method: 'POST', headers, body: JSON.stringify({ title: 'Recall interests' }) })
+    await pauseForProvider()
+    const recallResult = await request('/api/chat', { method: 'POST', headers, body: JSON.stringify({ thread_id: secondThread.thread.id, content: 'Which games or hobbies do I play?' }) })
+    crossThreadPreferenceRecall = { memories_created: preferenceCount >= 2, answer: recallResult.reply, passed: preferenceCount >= 2 && /cricket/i.test(recallResult.reply || '') && /chess/i.test(recallResult.reply || ''), skipped: false }
+  } catch (error) {
+    executionError = error.message
+    crossThreadPreferenceRecall = { ...crossThreadPreferenceRecall, skipped: true }
+  }
+}
+
 const durations = timings.map(item => item.duration_ms)
 const report = {
   schema_version: 1,
   evaluated_at: new Date().toISOString(),
   base,
   configuration: { strict, delay_ms: delayMs, cases_expected: cases.length, provider: outcomes.find(outcome => outcome.provider)?.provider || null },
-  completed: !executionError && outcomes.length === cases.length && !crossThreadRecall.skipped,
+  completed: !executionError && outcomes.length === cases.length && !crossThreadRecall.skipped && !crossThreadPreferenceRecall.skipped,
   error: executionError,
   totals,
   precision,
   recall,
   f1,
   cross_thread_recall: crossThreadRecall,
+  cross_thread_preference_recall: crossThreadPreferenceRecall,
   request_latency_ms: { count: durations.length, p50: percentile(durations, .5), p95: percentile(durations, .95), max: durations.length ? Math.max(...durations) : null },
   outcomes,
   requests: timings
@@ -122,4 +146,4 @@ if (reportPath) {
 const serialized = `${JSON.stringify(report, null, 2)}\n`
 if (report.report_path) await writeFile(report.report_path, serialized, 'utf8')
 console.log(serialized)
-if (strict && (!report.completed || precision < 0.8 || recall < 0.6 || !crossThreadRecall.passed)) process.exitCode = 1
+if (strict && (!report.completed || precision < 0.8 || recall < 0.6 || !crossThreadRecall.passed || !crossThreadPreferenceRecall.passed)) process.exitCode = 1
