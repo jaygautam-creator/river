@@ -83,7 +83,6 @@ function Auth({ onAuth }) {
         {notice && <div className="auth-notice" role="status">{notice}</div>}
         <button className="primary-button auth-submit" disabled={busy}>{busy ? <Loader2 className="spin" size={17} /> : mode === 'signup' ? 'Begin your thread' : mode === 'login' ? 'Welcome back' : mode === 'recovery' ? 'Send recovery instructions' : 'Save new password'}<ArrowUp size={17} /></button>
       </form>
-      {mode === 'login' && <button className="auth-link" onClick={() => { setMode('recovery'); setError(''); setNotice('') }}>Forgot your password?</button>}
       {(mode === 'recovery' || mode === 'reset') && <button className="auth-link" onClick={() => { window.history.replaceState({}, '', window.location.pathname); setMode('login'); setError(''); setNotice('') }}>Back to sign in</button>}
       <div className="auth-note"><BookOpen size={14} /> Your conversations and memories are private to your account.</div>
     </section>
