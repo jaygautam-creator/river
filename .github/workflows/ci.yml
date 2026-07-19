@@ -16,6 +16,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm audit --audit-level=high
-      - run: node --check server.js
+      - run: node --check server.js && node --check api/index.js && node --check realtime-gateway/src/index.js
       - run: node --check scripts/backup.mjs && node --check scripts/restore-backup.mjs && node --check scripts/memory-eval.mjs
       - run: npm run build

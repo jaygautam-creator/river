@@ -124,7 +124,7 @@ River includes two voice paths. Its default fallback is adaptive, turn-based Gro
 
 Draft launch documents are provided for legal review, not publication: [privacy policy](docs/PRIVACY_POLICY_DRAFT.md), [terms](docs/TERMS_OF_SERVICE_DRAFT.md), and [DPA](docs/DPA_DRAFT.md).
 
-For a production launch, use managed encrypted storage and complete independent security, privacy, and model-safety reviews. See [the production runbook](docs/PRODUCTION_RUNBOOK.md) for deployment, voice-quality, restore-drill, and incident-response gates.
+For a production launch, use managed encrypted storage and complete independent security, privacy, and model-safety reviews. See [the production runbook](docs/PRODUCTION_RUNBOOK.md) for deployment, voice-quality, restore-drill, and incident-response gates. The owner-facing [email delivery](docs/EMAIL_DELIVERY_SETUP.md), [Vercel monitoring](docs/VERCEL_MONITORING_SETUP.md), and [launch review checklist](docs/LAUNCH_REVIEW_CHECKLIST.md) make the remaining external work explicit.
 
 ## Project standards
 
