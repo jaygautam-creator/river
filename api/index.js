@@ -195,7 +195,11 @@ async function recentThreadMessages(userId, threadId, limit = 10) {
   const result = await q('SELECT role,content FROM messages WHERE user_id=$1 AND thread_id=$2 ORDER BY id DESC LIMIT $3', [userId, threadId, limit])
   return result.rows.reverse()
 }
-const recallIntent = content => /\b(what (?:do|did) (?:we|you) (?:talk|discuss|remember)|what (?:did|were) (?:we )?talk(?:ing)? about|remember (?:our|the|last|previous)|previous (?:conversation|thread|talk)|last (?:conversation|thread|talk))\b/i.test(String(content || ''))
+// Recall requests are often deliberately vague ("tell me about myself" or
+// "what do you know about me").  In that case lexical matching is the wrong
+// retrieval strategy: it would hide the person's own approved memories simply
+// because their question contains none of the original topic words.
+const recallIntent = content => /\b(what (?:do|did) (?:we|you) (?:talk|discuss|remember)|what (?:did|were) (?:we )?talk(?:ing)? about|remember (?:our|the|last|previous)|previous (?:conversation|thread|talk)|last (?:conversation|thread|talk)|tell me about (?:myself|me)|what do you know about me|who am i|about myself|my (?:details|profile|background))\b/i.test(String(content || ''))
 const words = value => new Set(String(value || '').toLowerCase().match(/[a-z]{3,}/g) || [])
 const memoryKinds = new Set(['preference', 'project', 'plan', 'relationship', 'wellbeing', 'identity', 'other'])
 const normalizeMemoryKind = value => memoryKinds.has(String(value || '').toLowerCase()) ? String(value).toLowerCase() : 'other'
@@ -381,7 +385,10 @@ app.post('/api/voice/live/turn', auth, quota('voice_live_turn', 'DAILY_VOICE_TUR
 app.post('/api/voice/transcribe', auth, quota('voice_transcription', 'DAILY_VOICE_TRANSCRIPTION_LIMIT', 45), express.raw({ type: 'audio/*', limit: '25mb' }), async (req, res) => { if (!process.env.GROQ_API_KEY) return res.status(503).json({ error: 'Groq voice is not configured.' }); if (!Buffer.isBuffer(req.body) || req.body.length < 32) return res.status(400).json({ error: 'A short audio recording is required.' }); try { const form = new FormData(); form.append('file', new Blob([req.body], { type: req.headers['content-type'] || 'audio/webm' }), 'river.webm'); form.append('model', process.env.GROQ_TRANSCRIPTION_MODEL || 'whisper-large-v3-turbo'); const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` }, body: form, signal: AbortSignal.timeout(35_000) }); if (!response.ok) throw new Error('transcription failed'); const transcript = String((await response.json()).text || '').trim(); transcript ? res.json({ transcript }) : res.status(422).json({ error: 'River could not hear any speech.' }) } catch { res.status(502).json({ error: 'River could not transcribe this recording.' }) } })
 app.post('/api/voice/speak', auth, quota('voice_speech', 'DAILY_VOICE_SPEECH_LIMIT', 60), async (req, res) => {
   if (!process.env.GROQ_API_KEY) return res.status(503).json({ error: 'Groq voice is not configured.', code: 'voice_not_configured' })
-  const input = String(req.body?.text || '').trim().slice(0, 200)
+  // A 200-character cap was short enough to cut a normal three-sentence reply
+  // in the middle. The reply model is already instructed to be concise; this
+  // defensive cap only protects the provider request.
+  const input = String(req.body?.text || '').trim().slice(0, 600)
   if (!input) return res.status(400).json({ error: 'Text is required.', code: 'text_required' })
   const model = process.env.GROQ_SPEECH_MODEL || 'canopylabs/orpheus-v1-english'
   try {
@@ -389,7 +396,10 @@ app.post('/api/voice/speak', auth, quota('voice_speech', 'DAILY_VOICE_SPEECH_LIM
       method: 'POST',
       headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
       signal: AbortSignal.timeout(35_000),
-      body: JSON.stringify({ model, voice: process.env.GROQ_SPEECH_VOICE || 'hannah', input, response_format: 'wav' })
+      // River has one product voice. Keeping this fixed prevents a reply from
+      // switching persona because an environment variable or browser default
+      // happened to differ between turns.
+      body: JSON.stringify({ model, voice: 'hannah', input, response_format: 'wav' })
     })
     if (!response.ok) {
       const failure = await response.json().catch(() => ({}))

@@ -338,10 +338,19 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
   const speakWithDeviceVoice = text => {
     if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance || !String(text || '').trim()) return false
     try {
+      // A provider outage must not silently change River into whatever voice a
+      // device happens to choose (often a different gender/persona). Use the
+      // browser fallback only when it exposes an explicitly feminine voice;
+      // otherwise keep the already-rendered text reply available.
+      const availableVoices = window.speechSynthesis.getVoices()
+      const language = String(navigator.language || 'en').split('-')[0].toLowerCase()
+      const languageVoices = availableVoices.filter(voice => String(voice.lang || '').toLowerCase().startsWith(language))
+      const preferredVoice = (languageVoices.length ? languageVoices : availableVoices).find(voice => /\b(female|woman|samantha|victoria|karen|moira|tessa|ava|zira|aria|sfg)\b/i.test(String(voice.name || '')))
+      if (!preferredVoice) return false
       if (deviceSpeechTimerRef.current) window.clearTimeout(deviceSpeechTimerRef.current)
       window.speechSynthesis.cancel()
       const utterance = new window.SpeechSynthesisUtterance(String(text).trim())
-      utterance.lang = navigator.language || 'en-US'; utterance.rate = 0.98
+      utterance.lang = preferredVoice.lang || navigator.language || 'en-US'; utterance.voice = preferredVoice; utterance.rate = 0.98
       utterance.onend = () => { if (deviceSpeechTimerRef.current) window.clearTimeout(deviceSpeechTimerRef.current); deviceSpeechTimerRef.current = null; resumeAfterReply() }
       utterance.onerror = () => { if (deviceSpeechTimerRef.current) window.clearTimeout(deviceSpeechTimerRef.current); deviceSpeechTimerRef.current = null; setVoiceState(turnModeRef.current === 'tap' ? 'ready' : 'listening'); setMessage('River replied in text, but this browser could not speak it. You can continue talking or use text.') }
       window.speechSynthesis.speak(utterance)
@@ -431,7 +440,10 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
           if (now - speechOnsetRef.current >= 180) { heardSpeechRef.current = true; lastSpeechRef.current = now }
         } else speechOnsetRef.current = 0
         const sustainedInterruption = currentVolume > Math.max(threshold * 1.75, noiseFloorRef.current + 4) && speechOnsetRef.current && now - speechOnsetRef.current >= 700
-        if (stateRef.current === 'speaking' && sustainedInterruption) {
+        // Press-to-talk is intentionally non-interruptible while River speaks:
+        // otherwise the microphone can hear River's own speaker audio and cut
+        // a reply off. Real barge-in remains available in hands-free mode.
+        if (turnModeRef.current === 'handsfree' && stateRef.current === 'speaking' && sustainedInterruption) {
           metric('turn', turnStartedRef.current, 'interrupted'); speechAbortRef.current?.abort(); discardAudio(); try { window.speechSynthesis?.cancel() } catch {}
           if (turnModeRef.current === 'tap') { setVoiceState('ready'); setMessage('River stopped. Hold to talk when you are ready.') } else beginListening(false)
           return
