@@ -425,7 +425,10 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
       const live = skipLive ? null : await api('/api/voice/live/session').catch(() => null)
       if (live?.enabled) { conversationRef.current = true; liveReconnectAttemptsRef.current = 0; await beginLive(live); return }
       const session = await api('/api/voice/session')
-      if (!session.enabled || session.provider !== 'groq') throw new Error('Groq voice is not configured for this River environment yet.')
+      // The voice pipeline can use different providers for speech input and
+      // speech output. Do not couple the browser to a provider name: Gemini
+      // speech + Groq transcription is a valid, supported configuration.
+      if (!session.enabled) throw new Error(session.message || 'Voice is not configured for this River environment yet.')
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); streamRef.current = stream
       const AudioContextClass = window.AudioContext || window.webkitAudioContext; const context = new AudioContextClass(); contextRef.current = context
       if (context.state === 'suspended') await context.resume()

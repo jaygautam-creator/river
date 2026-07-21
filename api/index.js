@@ -430,14 +430,23 @@ const groqSpeech = async input => {
 }
 
 app.get('/api/voice/session', auth, (req, res) => {
-  const speechProvider = process.env.GEMINI_API_KEY ? 'gemini' : (process.env.GROQ_API_KEY ? 'groq' : null)
+  const transcriptionReady = Boolean(process.env.GROQ_API_KEY)
+  const speechProvider = process.env.GEMINI_API_KEY ? 'gemini' : (transcriptionReady ? 'groq' : null)
+  const speechReady = Boolean(speechProvider)
+  const enabled = transcriptionReady && speechReady
+  const message = enabled
+    ? `River voice is ready with ${speechProvider === 'gemini' ? 'Gemini speech and Groq transcription' : 'Groq transcription and speech'}.`
+    : !transcriptionReady && speechReady
+      ? 'River can create speech, but voice input is unavailable because transcription is not configured. Add GROQ_API_KEY to this environment, then redeploy.'
+      : 'River voice is not configured for this environment. Add GROQ_API_KEY for transcription and GEMINI_API_KEY or GROQ_API_KEY for speech, then redeploy.'
   res.json({
-    enabled: Boolean(process.env.GROQ_API_KEY && speechProvider),
+    enabled,
     provider: speechProvider,
+    capabilities: { transcription: transcriptionReady, speech: speechReady, device_speech_fallback: true },
     transcription_model: process.env.GROQ_TRANSCRIPTION_MODEL || 'whisper-large-v3-turbo',
     speech_model: speechProvider === 'gemini' ? (process.env.GEMINI_SPEECH_MODEL || 'gemini-3.1-flash-tts-preview') : (process.env.GROQ_SPEECH_MODEL || 'canopylabs/orpheus-v1-english'),
     device_speech_fallback: true,
-    message: process.env.GROQ_API_KEY && speechProvider ? `River voice is ready with ${speechProvider === 'gemini' ? 'Gemini speech and Groq transcription' : 'Groq'}.` : 'Voice requires a configured transcription provider.'
+    message
   })
 })
 app.get('/api/voice/live/session', auth, async (req, res) => {

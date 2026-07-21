@@ -33,6 +33,8 @@ for (const [name, source, expected] of [
   ['Gemini preferred speech provider', api, "gemini-3.1-flash-tts-preview"],
   ['Gemini speech fallback to Groq', api, 'if (!speech && process.env.GROQ_API_KEY)'],
   ['Gemini PCM speech is wrapped as WAV', api, 'const pcm16ToWav'],
+  ['voice readiness exposes distinct capabilities', api, 'capabilities: { transcription: transcriptionReady, speech: speechReady, device_speech_fallback: true }'],
+  ['voice client is provider-neutral', client, "if (!session.enabled) throw new Error(session.message || 'Voice is not configured for this River environment yet.')"],
   ['shared IP rate limiter', api, 'rate_limit_buckets'],
   ['privacy-hashed abuse key', api, 'const clientFingerprint'],
   ['daily AI quota guard', api, 'const quota = (category, envName, fallback)'],
@@ -44,4 +46,5 @@ for (const [name, source, expected] of [
 ]) assert.ok(source.includes(expected), `Missing regression contract: ${name}`)
 
 assert.ok(!client.includes('river.live?token='), 'Live voice tokens must not appear in URLs.')
+assert.ok(!client.includes("session.provider !== 'groq'"), 'Voice client must not reject a configured non-Groq speech provider.')
 console.log('River offline regression contracts passed.')
