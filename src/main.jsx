@@ -91,8 +91,65 @@ function Auth({ onAuth }) {
 }
 
 function Sidebar({ user, threads, activeThreadId, onSelectThread, onNew, onLogout, onSeed, seeding, onPrivacy, onToday, onMemory, onRenameThread, onDeleteThread }) {
+  const [moreOpen, setMoreOpen] = useState(false)
+  const moreTriggerRef = useRef(null)
+  const moreMenuRef = useRef(null)
+
+  const closeMoreMenu = (returnFocus = false) => {
+    setMoreOpen(false)
+    if (returnFocus) requestAnimationFrame(() => moreTriggerRef.current?.focus())
+  }
+
+  useEffect(() => {
+    if (!moreOpen) return
+
+    const onKeyDown = event => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeMoreMenu(true)
+      }
+    }
+    const onPointerDown = event => {
+      if (!moreMenuRef.current?.contains(event.target) && !moreTriggerRef.current?.contains(event.target)) {
+        closeMoreMenu()
+      }
+    }
+
+    document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('pointerdown', onPointerDown)
+    moreMenuRef.current?.querySelector('button:not(:disabled)')?.focus()
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('pointerdown', onPointerDown)
+    }
+  }, [moreOpen])
+
+  const runMoreAction = action => {
+    closeMoreMenu()
+    action()
+  }
+
   return <aside className="sidebar">
-    <div className="sidebar-top"><div className="brand"><RiverMark className="brand-mark small" /><span>river</span></div><button className="icon-button subtle" aria-label="More options"><MoreHorizontal size={18} /></button></div>
+    <div className="sidebar-top">
+      <div className="brand"><RiverMark className="brand-mark small" /><span>river</span></div>
+      <button
+        ref={moreTriggerRef}
+        className="icon-button subtle"
+        aria-label="Open River options"
+        aria-haspopup="menu"
+        aria-expanded={moreOpen}
+        onClick={() => setMoreOpen(open => !open)}
+      >
+        <MoreHorizontal size={18} />
+      </button>
+      {moreOpen && <div ref={moreMenuRef} className="sidebar-more-menu" role="menu" aria-label="River options">
+        <button type="button" role="menuitem" onClick={() => runMoreAction(onPrivacy)}><Settings2 size={15} /> Account & privacy</button>
+        <button type="button" role="menuitem" onClick={() => runMoreAction(onMemory)}><BookOpen size={15} /> Open memory</button>
+        <button type="button" role="menuitem" onClick={() => runMoreAction(onSeed)} disabled={seeding}><Zap size={15} /> {seeding ? 'Opening memory…' : 'Review memory'}</button>
+        <div className="sidebar-menu-divider" role="separator" />
+        <button type="button" role="menuitem" className="danger" onClick={() => runMoreAction(onLogout)}><LogOut size={15} /> Sign out</button>
+      </div>}
+    </div>
     <button className="new-thread" onClick={onNew}><Plus size={16} /> New thread <span>⌘ N</span></button>
     <div className="nav-label">Your space</div>
     <nav className="nav-list"><button className="nav-item selected" onClick={onToday}><Compass size={17} /><span>Today</span><span className="nav-count">{threads.length}</span></button><button className="nav-item" onClick={onMemory}><BookOpen size={17} /><span>Memory</span></button></nav>
