@@ -50,6 +50,8 @@ const ensureSchema = () => schemaReady ||= q(`
   ALTER TABLE storylines ADD COLUMN IF NOT EXISTS embedding JSONB;
   ALTER TABLE memory_proposals ADD COLUMN IF NOT EXISTS memory_kind TEXT NOT NULL DEFAULT 'other';
   CREATE TABLE IF NOT EXISTS passkey_credentials (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, credential_id TEXT NOT NULL UNIQUE, public_key BYTEA NOT NULL, counter BIGINT NOT NULL DEFAULT 0, transports JSONB NOT NULL DEFAULT '[]'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), last_used_at TIMESTAMPTZ);
+  CREATE TABLE IF NOT EXISTS recovery_codes (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, code_hash TEXT NOT NULL, used_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+  CREATE INDEX IF NOT EXISTS recovery_codes_active_idx ON recovery_codes(user_id) WHERE used_at IS NULL;
   CREATE INDEX IF NOT EXISTS threads_user_updated_idx ON threads(user_id, updated_at DESC);
   CREATE INDEX IF NOT EXISTS messages_user_thread_idx ON messages(user_id, thread_id, id);
   CREATE INDEX IF NOT EXISTS storylines_user_updated_idx ON storylines(user_id, last_updated_at DESC);
@@ -139,7 +141,8 @@ app.use(async (req, res, next) => {
   const policy = req.path === '/api/auth/signup' ? ['signup', 4, 3600]
     : req.path === '/api/auth/login' ? ['login', 12, 900]
       : req.path === '/api/auth/password-reset/request' ? ['recovery', 4, 3600]
-        : ['api', positiveInt(process.env.RATE_LIMIT_IP_PER_MINUTE, 180), 60]
+        : req.path === '/api/auth/password-reset/recover' ? ['recover', 10, 900]
+          : ['api', positiveInt(process.env.RATE_LIMIT_IP_PER_MINUTE, 180), 60]
   try {
     const result = await consumeRateLimit(`ip:${policy[0]}:${clientFingerprint(req)}`, policy[1], policy[2])
     if (result.allowed) return next()
@@ -155,7 +158,7 @@ app.use((req, res, next) => {
   // cookie-authenticated path. This also lets pre-upgrade sessions recover.
   if (String(req.headers.authorization || '').startsWith('Bearer ')) return next()
   const cookieSession = readCookie(req, 'river_access') || readCookie(req, 'river_refresh')
-  const exempt = ['/api/auth/signup', '/api/auth/login', '/api/auth/refresh', '/api/auth/password-reset/request', '/api/auth/password-reset/complete', '/api/auth/email-verification/complete']
+  const exempt = ['/api/auth/signup', '/api/auth/login', '/api/auth/refresh', '/api/auth/password-reset/request', '/api/auth/password-reset/recover', '/api/auth/password-reset/complete', '/api/auth/email-verification/complete']
   if (!cookieSession || exempt.includes(req.path)) return next()
   const cookieToken = readCookie(req, 'river_csrf') || ''
   const headerToken = String(req.headers['x-csrf-token'] || '')
@@ -308,12 +311,22 @@ async function relevantStories(userId, content) {
   }
   return merged
 }
+// Backup recovery codes: an email-free way to regain an account after a
+// forgotten password. Codes are high-entropy, shown once, and stored only as
+// hashes. Entry is forgiving (case/spacing/dashes are normalized away).
+const normalizeRecoveryCode = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+async function generateRecoveryCodes(userId, runner = pool) {
+  const raw = Array.from({ length: 8 }, () => crypto.randomBytes(5).toString('hex'))
+  await runner.query('DELETE FROM recovery_codes WHERE user_id=$1', [userId])
+  for (const code of raw) await runner.query('INSERT INTO recovery_codes(user_id,code_hash) VALUES($1,$2)', [userId, hashToken(normalizeRecoveryCode(code))])
+  return raw.map(code => `${code.slice(0, 5)}-${code.slice(5)}`)
+}
 async function issueRefreshToken(userId, req) {
   const token = crypto.randomBytes(48).toString('base64url')
   await q('INSERT INTO refresh_tokens(user_id,token_hash,expires_at,user_agent,ip_address) VALUES($1,$2,$3,$4,$5)', [userId, hashToken(token), new Date(Date.now() + 1000 * 60 * 60 * 24 * 30), String(req.headers['user-agent'] || '').slice(0, 240), String(req.ip || '').slice(0, 64)])
   return token
 }
-async function respondSession(res, user, req, { notifyNewDevice = false } = {}) {
+async function respondSession(res, user, req, { notifyNewDevice = false, extra = {} } = {}) {
   const userAgent = String(req.headers['user-agent'] || '').slice(0, 240)
   const ipAddress = String(req.ip || '').slice(0, 64)
   const knownDevice = notifyNewDevice && (await q('SELECT id FROM refresh_tokens WHERE user_id=$1 AND revoked_at IS NULL AND user_agent=$2 AND ip_address=$3 LIMIT 1', [user.id, userAgent, ipAddress])).rowCount > 0
@@ -326,7 +339,7 @@ async function respondSession(res, user, req, { notifyNewDevice = false } = {}) 
     q('INSERT INTO audit_events(user_id,event,request_id,metadata) VALUES($1,$2,$3,$4)', [user.id, 'auth.new_device', req.requestId || null, JSON.stringify({ user_agent: userAgent, ip_address: ipAddress })]).catch(() => {})
     sendTransactionalEmail({ to: user.email, subject: 'New River sign-in', text: `A new sign-in to your River account was detected. If this was not you, reset your password and revoke unfamiliar sessions at ${origin}.` }).catch(() => {})
   }
-  res.json({ token, refresh_token: refreshToken, user: publicUser(user) })
+  res.json({ token, refresh_token: refreshToken, user: publicUser(user), ...extra })
 }
 const clearSession = res => ['river_access', 'river_refresh', 'river_csrf'].forEach(name => res.clearCookie(name, { ...cookieOptions(name !== 'river_csrf'), maxAge: 0 }))
 async function sendTransactionalEmail({ to, subject, text }) {
@@ -409,7 +422,7 @@ app.get('/api/internal/usage', async (req, res) => {
   } catch (error) { console.error(error); res.status(503).json({ error: 'Usage analytics are unavailable.' }) }
 })
 
-app.post('/api/auth/signup', verifyTurnstile, async (req, res) => { const { name, email, password } = req.body || {}; if (!name || !email || String(password).length < 8) return res.status(400).json({ error: 'Name, email, and an 8+ character password are required.' }); try { const user = (await q('INSERT INTO users(name,email,password_hash) VALUES($1,$2,$3) RETURNING *', [String(name).trim().slice(0, 120), String(email).toLowerCase().trim(), bcrypt.hashSync(password, 12)])).rows[0]; await ensureThread(user.id); req.user = user; audit(req, 'auth.signup'); if (process.env.RESEND_API_KEY) sendVerification(user).catch(() => {}); await respondSession(res, user, req) } catch { res.status(409).json({ error: 'An account with that email already exists.' }) } })
+app.post('/api/auth/signup', verifyTurnstile, async (req, res) => { const { name, email, password } = req.body || {}; if (!name || !email || String(password).length < 8) return res.status(400).json({ error: 'Name, email, and an 8+ character password are required.' }); try { const user = (await q('INSERT INTO users(name,email,password_hash) VALUES($1,$2,$3) RETURNING *', [String(name).trim().slice(0, 120), String(email).toLowerCase().trim(), bcrypt.hashSync(password, 12)])).rows[0]; await ensureThread(user.id); req.user = user; const recovery_codes = await generateRecoveryCodes(user.id); audit(req, 'auth.signup'); if (process.env.RESEND_API_KEY) sendVerification(user).catch(() => {}); await respondSession(res, user, req, { extra: { recovery_codes } }) } catch { res.status(409).json({ error: 'An account with that email already exists.' }) } })
 app.post('/api/auth/login', verifyTurnstile, async (req, res) => { const user = (await q('SELECT * FROM users WHERE email=$1', [String(req.body?.email || '').toLowerCase().trim()])).rows[0]; if (user?.locked_until && new Date(user.locked_until) > new Date()) return res.status(429).json({ error: 'Too many unsuccessful sign-in attempts. Try again later or reset your password.' }); if (!user || !bcrypt.compareSync(req.body?.password || '', user.password_hash)) { if (user) { const attempts = user.failed_login_count + 1; await q('UPDATE users SET failed_login_count=$1,locked_until=$2 WHERE id=$3', [attempts, attempts >= 5 ? new Date(Date.now() + 15 * 60000) : null, user.id]); audit({ ...req, user }, 'auth.login_failed', { attempts, locked: attempts >= 5 }) } return res.status(401).json({ error: 'That email and password don’t match.' }) } if (user.mfa_enabled_at && !verifyMfa(user, req.body?.otp)) { audit({ ...req, user }, 'auth.login_failed', { reason: 'mfa' }); return res.status(401).json({ error: 'Enter the current code from your authenticator app.', mfa_required: true }) } await q('UPDATE users SET failed_login_count=0,locked_until=NULL WHERE id=$1', [user.id]); audit({ ...req, user }, 'auth.login'); await respondSession(res, user, req, { notifyNewDevice: true }) })
 app.post('/api/auth/refresh', async (req, res) => { const supplied = String(req.body?.refresh_token || readCookie(req, 'river_refresh') || ''); const row = (await q('SELECT * FROM refresh_tokens WHERE token_hash=$1 AND revoked_at IS NULL AND expires_at>NOW()', [hashToken(supplied)])).rows[0]; if (!row) return res.status(401).json({ error: 'Refresh token is invalid or expired.' }); const user = (await q('SELECT * FROM users WHERE id=$1', [row.user_id])).rows[0]; await q('UPDATE refresh_tokens SET revoked_at=NOW() WHERE id=$1', [row.id]); audit(req, 'auth.refresh'); await respondSession(res, user, req) })
 app.post('/api/auth/logout', auth, async (req, res) => { const supplied = String(req.body?.refresh_token || readCookie(req, 'river_refresh') || ''); if (supplied) await q('UPDATE refresh_tokens SET revoked_at=NOW() WHERE token_hash=$1 AND revoked_at IS NULL', [hashToken(supplied)]); clearSession(res); audit(req, 'auth.logout'); res.json({ ok: true }) })
@@ -433,6 +446,29 @@ app.post('/api/auth/mfa/enable', auth, async (req, res) => { const user = (await
 app.post('/api/auth/mfa/disable', auth, async (req, res) => { if (!verifyMfa(req.user, req.body?.otp)) return res.status(400).json({ error: 'Enter a valid authenticator code to disable MFA.' }); await q('UPDATE users SET mfa_secret=NULL,mfa_enabled_at=NULL,session_version=session_version+1 WHERE id=$1', [req.user.id]); await q('UPDATE refresh_tokens SET revoked_at=NOW() WHERE user_id=$1 AND revoked_at IS NULL', [req.user.id]); const refreshed = (await q('SELECT * FROM users WHERE id=$1', [req.user.id])).rows[0]; audit(req, 'auth.mfa_disabled'); await respondSession(res, refreshed, req) })
 app.post('/api/auth/password-reset/request', verifyTurnstile, async (req, res) => { const user = (await q('SELECT * FROM users WHERE email=$1', [String(req.body?.email || '').toLowerCase().trim()])).rows[0]; if (user && process.env.RESEND_API_KEY && process.env.EMAIL_FROM) { const raw = crypto.randomBytes(32).toString('base64url'); await q('INSERT INTO password_reset_tokens(user_id,token_hash,expires_at) VALUES($1,$2,$3)', [user.id, hashToken(raw), new Date(Date.now() + 30 * 60000)]); sendTransactionalEmail({ to: user.email, subject: 'Reset your River password', text: `Use this link within 30 minutes to reset your River password: ${origin}/?reset_token=${encodeURIComponent(raw)}` }).catch(() => {}); audit({ ...req, user }, 'auth.password_reset_requested') } res.json({ message: process.env.RESEND_API_KEY ? 'If an account exists for that email, recovery instructions will be sent.' : 'Email recovery is not configured for this demo deployment yet.' }) })
 app.post('/api/auth/password-reset/complete', async (req, res) => { const password = String(req.body?.password || ''); const token = String(req.body?.token || ''); if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters.' }); const row = (await q('SELECT * FROM password_reset_tokens WHERE token_hash=$1 AND used_at IS NULL AND expires_at>NOW()', [hashToken(token)])).rows[0]; if (!row) return res.status(400).json({ error: 'Recovery token is invalid or expired.' }); const client = await pool.connect(); try { await client.query('BEGIN'); await client.query('UPDATE users SET password_hash=$1,session_version=session_version+1,failed_login_count=0,locked_until=NULL WHERE id=$2', [bcrypt.hashSync(password, 12), row.user_id]); await client.query('UPDATE password_reset_tokens SET used_at=NOW() WHERE id=$1', [row.id]); await client.query('UPDATE refresh_tokens SET revoked_at=NOW() WHERE user_id=$1 AND revoked_at IS NULL', [row.user_id]); await client.query('COMMIT') } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() } res.json({ ok: true }) })
+app.post('/api/auth/recovery-codes/regenerate', auth, async (req, res) => { const recovery_codes = await generateRecoveryCodes(req.user.id); audit(req, 'auth.recovery_codes_regenerated'); res.json({ recovery_codes }) })
+app.get('/api/auth/recovery-codes/status', auth, async (req, res) => { const remaining = (await q('SELECT COUNT(*)::int AS count FROM recovery_codes WHERE user_id=$1 AND used_at IS NULL', [req.user.id])).rows[0].count; res.json({ remaining }) })
+app.post('/api/auth/password-reset/recover', verifyTurnstile, async (req, res) => {
+  const email = String(req.body?.email || '').toLowerCase().trim()
+  const code = normalizeRecoveryCode(req.body?.code)
+  const password = String(req.body?.password || '')
+  if (password.length < 8) return res.status(400).json({ error: 'Choose a new password of at least 8 characters.' })
+  const user = (await q('SELECT * FROM users WHERE email=$1', [email])).rows[0]
+  const match = user && code ? (await q('SELECT id FROM recovery_codes WHERE user_id=$1 AND code_hash=$2 AND used_at IS NULL', [user.id, hashToken(code)])).rows[0] : null
+  // Uniform failure for a bad email or a bad code, so neither can be probed.
+  if (!user || !match) { if (user) audit({ ...req, user }, 'auth.recovery_code_failed'); return res.status(400).json({ error: 'That email and recovery code do not match.' }) }
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('UPDATE users SET password_hash=$1,session_version=session_version+1,failed_login_count=0,locked_until=NULL WHERE id=$2', [bcrypt.hashSync(password, 12), user.id])
+    await client.query('UPDATE recovery_codes SET used_at=NOW() WHERE id=$1', [match.id])
+    await client.query('UPDATE refresh_tokens SET revoked_at=NOW() WHERE user_id=$1 AND revoked_at IS NULL', [user.id])
+    await client.query('COMMIT')
+  } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
+  const remaining = (await q('SELECT COUNT(*)::int AS count FROM recovery_codes WHERE user_id=$1 AND used_at IS NULL', [user.id])).rows[0].count
+  audit({ ...req, user }, 'auth.recovery_code_used')
+  res.json({ ok: true, remaining_codes: remaining })
+})
 app.post('/api/auth/email-verification/request', auth, async (req, res) => { if (req.user.email_verified_at) return res.json({ message: 'Your email is already verified.' }); if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM) return res.status(503).json({ error: 'Email delivery is not configured for this deployment yet.' }); await sendVerification(req.user); audit(req, 'auth.email_verification_requested'); res.json({ message: 'Verification instructions have been sent.' }) })
 app.post('/api/auth/email-verification/complete', async (req, res) => { const row = (await q('SELECT * FROM email_verification_tokens WHERE token_hash=$1 AND used_at IS NULL AND expires_at>NOW()', [hashToken(String(req.body?.token || ''))])).rows[0]; if (!row) return res.status(400).json({ error: 'Verification link is invalid or expired.' }); await q('UPDATE users SET email_verified_at=NOW() WHERE id=$1', [row.user_id]); await q('UPDATE email_verification_tokens SET used_at=NOW() WHERE id=$1', [row.id]); res.json({ ok: true }) })
 

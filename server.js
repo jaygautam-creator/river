@@ -94,6 +94,14 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
   );
+  CREATE TABLE IF NOT EXISTS recovery_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    code_hash TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
   CREATE TABLE IF NOT EXISTS email_verification_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -200,7 +208,7 @@ const clearSessionCookies = res => ['river_access', 'river_refresh', 'river_csrf
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api') || ['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next()
   const cookieSession = readCookie(req, 'river_access') || readCookie(req, 'river_refresh')
-  const exempt = ['/api/auth/signup', '/api/auth/login', '/api/auth/password-reset/request', '/api/auth/password-reset/complete', '/api/auth/email-verification/complete']
+  const exempt = ['/api/auth/signup', '/api/auth/login', '/api/auth/password-reset/request', '/api/auth/password-reset/recover', '/api/auth/password-reset/complete', '/api/auth/email-verification/complete']
   if (!cookieSession || exempt.includes(req.path)) return next()
   const cookieToken = readCookie(req, 'river_csrf') || ''
   const headerToken = String(req.headers['x-csrf-token'] || '')
@@ -240,11 +248,21 @@ const issueRefreshToken = (userId, req) => {
   db.prepare('INSERT INTO refresh_tokens (user_id, token_hash, expires_at, user_agent, ip_address) VALUES (?, ?, ?, ?, ?)').run(userId, hashToken(token), new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString(), String(req?.headers['user-agent'] || '').slice(0, 240), String(req?.ip || '').slice(0, 64))
   return token
 }
-const respondSession = (res, user, req) => {
+const respondSession = (res, user, req, extra = {}) => {
   const token = tokenFor(user)
   const refreshToken = issueRefreshToken(user.id, req)
   setSessionCookies(res, token, refreshToken)
-  res.json({ token, refresh_token: refreshToken, user: publicUser(user) })
+  res.json({ token, refresh_token: refreshToken, user: publicUser(user), ...extra })
+}
+// Email-free account recovery: high-entropy single-use codes, stored only as
+// hashes and shown once. Entry is normalized so case/spacing/dashes don't matter.
+const normalizeRecoveryCode = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+const generateRecoveryCodes = userId => {
+  const raw = Array.from({ length: 8 }, () => crypto.randomBytes(5).toString('hex'))
+  db.prepare('DELETE FROM recovery_codes WHERE user_id = ?').run(userId)
+  const insert = db.prepare('INSERT INTO recovery_codes (user_id, code_hash) VALUES (?, ?)')
+  for (const code of raw) insert.run(userId, hashToken(normalizeRecoveryCode(code)))
+  return raw.map(code => `${code.slice(0, 5)}-${code.slice(5)}`)
 }
 const encryptField = value => { const iv = crypto.randomBytes(12); const cipher = crypto.createCipheriv('aes-256-gcm', fieldKey, iv); const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]); return `${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${ciphertext.toString('base64url')}` }
 const decryptField = value => { const [iv, tag, ciphertext] = String(value || '').split('.').map(x => Buffer.from(x, 'base64url')); const decipher = crypto.createDecipheriv('aes-256-gcm', fieldKey, iv); decipher.setAuthTag(tag); return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8') }
@@ -465,9 +483,10 @@ app.post('/api/auth/signup', (req, res) => {
     const result = db.prepare('INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)').run(name.trim(), email.toLowerCase().trim(), bcrypt.hashSync(password, 10))
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid)
     ensureThread(user.id)
+    const recovery_codes = generateRecoveryCodes(user.id)
     sendEmailVerification(user).catch(error => console.error(`Email verification delivery failed: ${error.message}`))
     audit(req, 'auth.signup')
-    respondSession(res, user, req)
+    respondSession(res, user, req, { recovery_codes })
   } catch { res.status(409).json({ error: 'An account with that email already exists.' }) }
 })
 
@@ -571,6 +590,32 @@ app.post('/api/auth/password-reset/complete', (req, res) => {
   })()
   audit(req, 'auth.password_reset_completed')
   res.json({ ok: true })
+})
+app.post('/api/auth/recovery-codes/regenerate', auth, (req, res) => {
+  const recovery_codes = generateRecoveryCodes(req.user.id)
+  audit(req, 'auth.recovery_codes_regenerated')
+  res.json({ recovery_codes })
+})
+app.get('/api/auth/recovery-codes/status', auth, (req, res) => {
+  const remaining = db.prepare('SELECT COUNT(*) AS count FROM recovery_codes WHERE user_id = ? AND used_at IS NULL').get(req.user.id).count
+  res.json({ remaining })
+})
+app.post('/api/auth/password-reset/recover', (req, res) => {
+  const email = String(req.body?.email || '').toLowerCase().trim()
+  const code = normalizeRecoveryCode(req.body?.code)
+  const password = String(req.body?.password || '')
+  if (password.length < 8) return res.status(400).json({ error: 'Choose a new password of at least 8 characters.' })
+  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email)
+  const match = user && code ? db.prepare('SELECT id FROM recovery_codes WHERE user_id = ? AND code_hash = ? AND used_at IS NULL').get(user.id, hashToken(code)) : null
+  if (!user || !match) { if (user) audit({ ...req, user }, 'auth.recovery_code_failed'); return res.status(400).json({ error: 'That email and recovery code do not match.' }) }
+  db.transaction(() => {
+    db.prepare('UPDATE users SET password_hash = ?, session_version = session_version + 1, failed_login_count = 0, locked_until = NULL WHERE id = ?').run(bcrypt.hashSync(password, 12), user.id)
+    db.prepare('UPDATE recovery_codes SET used_at = ? WHERE id = ?').run(now(), match.id)
+    db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').run(now(), user.id)
+  })()
+  const remaining = db.prepare('SELECT COUNT(*) AS count FROM recovery_codes WHERE user_id = ? AND used_at IS NULL').get(user.id).count
+  audit({ ...req, user }, 'auth.recovery_code_used')
+  res.json({ ok: true, remaining_codes: remaining })
 })
 app.post('/api/auth/email-verification/request', auth, async (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)
