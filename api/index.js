@@ -47,6 +47,7 @@ const ensureSchema = () => schemaReady ||= q(`
   ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
   ALTER TABLE users ADD COLUMN IF NOT EXISTS memory_mode TEXT NOT NULL DEFAULT 'auto';
   ALTER TABLE storylines ADD COLUMN IF NOT EXISTS memory_kind TEXT NOT NULL DEFAULT 'other';
+  ALTER TABLE storylines ADD COLUMN IF NOT EXISTS embedding JSONB;
   ALTER TABLE memory_proposals ADD COLUMN IF NOT EXISTS memory_kind TEXT NOT NULL DEFAULT 'other';
   CREATE TABLE IF NOT EXISTS passkey_credentials (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, credential_id TEXT NOT NULL UNIQUE, public_key BYTEA NOT NULL, counter BIGINT NOT NULL DEFAULT 0, transports JSONB NOT NULL DEFAULT '[]'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), last_used_at TIMESTAMPTZ);
   CREATE INDEX IF NOT EXISTS threads_user_updated_idx ON threads(user_id, updated_at DESC);
@@ -189,7 +190,9 @@ async function ensureThread(userId, requested) {
   if (!thread) thread = (await q("INSERT INTO threads(user_id,title) VALUES($1,'Today') RETURNING *", [userId])).rows[0]
   return thread
 }
-async function stories(userId) { return (await q("SELECT * FROM storylines WHERE user_id=$1 ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'stale' THEN 1 ELSE 2 END,last_updated_at DESC", [userId])).rows }
+// Embedding vectors stay server-side (large, internal), so they are never
+// selected into the storyline payloads returned to the browser.
+async function stories(userId) { return (await q("SELECT id,user_id,topic,memory_kind,status,summary,source_quotes,first_mentioned_at,last_updated_at,follow_up_due FROM storylines WHERE user_id=$1 ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'stale' THEN 1 ELSE 2 END,last_updated_at DESC", [userId])).rows }
 async function proposals(userId) { return (await q("SELECT * FROM memory_proposals WHERE user_id=$1 AND status='pending' ORDER BY created_at DESC", [userId])).rows }
 async function recentThreadMessages(userId, threadId, limit = 10) {
   const result = await q('SELECT role,content FROM messages WHERE user_id=$1 AND thread_id=$2 ORDER BY id DESC LIMIT $3', [userId, threadId, limit])
@@ -209,18 +212,101 @@ const overlapScore = (left, right) => {
   let shared = 0; a.forEach(word => { if (b.has(word)) shared += 1 })
   return shared / Math.min(a.size, b.size)
 }
+const RECALL_LIMIT = 8
+// Semantic recall. Embeddings let a new thread's "which college do I go to?"
+// match an approved memory phrased "studies at Stanford" even with no shared
+// words. It is strictly additive: when no embedding provider is configured, or
+// any call fails, retrieval degrades to the lexical + identity + recency blend
+// below, so recall never depends on the embedding path succeeding.
+const embeddingsEnabled = () => Boolean(process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY)
+const storylineEmbeddingText = story => `${story.topic}. ${story.summary}`.slice(0, 2000)
+async function embedText(text) {
+  const input = String(text || '').trim().slice(0, 2000)
+  if (!input) return null
+  try {
+    if (process.env.OPENAI_API_KEY) {
+      const response = await fetch('https://api.openai.com/v1/embeddings', { method: 'POST', headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(10_000), body: JSON.stringify({ model: process.env.OPENAI_EMBED_MODEL || 'text-embedding-3-small', input }) })
+      if (!response.ok) return null
+      const vector = (await response.json()).data?.[0]?.embedding
+      return Array.isArray(vector) ? vector : null
+    }
+    if (process.env.GEMINI_API_KEY) {
+      const model = process.env.GEMINI_EMBED_MODEL || 'text-embedding-004'
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:embedContent`, { method: 'POST', headers: { 'x-goog-api-key': process.env.GEMINI_API_KEY, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(10_000), body: JSON.stringify({ model: `models/${model}`, content: { parts: [{ text: input }] } }) })
+      if (!response.ok) return null
+      const vector = (await response.json()).embedding?.values
+      return Array.isArray(vector) ? vector : null
+    }
+  } catch { return null }
+  return null
+}
+function cosineSimilarity(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length || !a.length) return 0
+  let dot = 0, normA = 0, normB = 0
+  for (let i = 0; i < a.length; i += 1) { dot += a[i] * b[i]; normA += a[i] * a[i]; normB += b[i] * b[i] }
+  const denominator = Math.sqrt(normA) * Math.sqrt(normB)
+  return denominator ? dot / denominator : 0
+}
+// Fire-and-forget: keep the embedding column current without adding latency to
+// the chat request that created or updated the memory.
+function backfillStorylineEmbedding(storyline) {
+  if (!storyline?.id || !embeddingsEnabled()) return
+  embedText(storylineEmbeddingText(storyline)).then(vector => {
+    if (vector) return q('UPDATE storylines SET embedding=$1::jsonb WHERE id=$2', [JSON.stringify(vector), storyline.id])
+  }).catch(() => {})
+}
+// Lexical overlap alone is brittle: a new thread asking "which university do I
+// go to?" shares no words with a memory stored as "Studies at Stanford", so a
+// hard score>0 filter would hide the person's own approved facts.  Instead we
+// use lexical scoring only to *rank*, then always guarantee the model also sees
+// durable identity memories and a recency baseline, and let it do the semantic
+// matching.  This keeps cross-thread recall working without exact wording.
 async function relevantStories(userId, content) {
   const all = await stories(userId)
-  if (recallIntent(content)) return all.slice(0, 6)
+  if (recallIntent(content)) return all.slice(0, RECALL_LIMIT)
   const query = words(content)
-  const ranked = all.map(story => {
+  const scoreFor = story => {
     const topic = words(story.topic); const summary = words(story.summary)
     const lexical = Array.from(query).reduce((total, word) => total + (topic.has(word) ? 4 : 0) + (summary.has(word) ? 2 : 0), 0)
     const category = preferenceIntent(content) && story.memory_kind === 'preference' ? 3 : 0
-    const score = lexical + category
-    return { story, score }
-  }).filter(item => item.score > 0).sort((a, b) => b.score - a.score || new Date(b.story.last_updated_at) - new Date(a.story.last_updated_at))
-  return ranked.map(item => item.story).slice(0, 6)
+    return lexical + category
+  }
+  const lexicalMatches = all.map(story => ({ story, score: scoreFor(story) }))
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score || new Date(b.story.last_updated_at) - new Date(a.story.last_updated_at))
+    .map(item => item.story)
+  // Semantic layer: rank memories that carry an embedding by cosine similarity
+  // to the question. Any memory still missing an embedding is queued for
+  // backfill so the corpus fills in over time without a migration job.
+  let semanticMatches = []
+  if (embeddingsEnabled()) {
+    const [queryVector, vectorRows] = await Promise.all([
+      embedText(content),
+      q('SELECT id, embedding FROM storylines WHERE user_id=$1 AND embedding IS NOT NULL', [userId])
+    ])
+    const vectorById = new Map(vectorRows.rows.map(row => [row.id, row.embedding]))
+    if (queryVector) {
+      semanticMatches = all
+        .map(story => ({ story, similarity: cosineSimilarity(queryVector, vectorById.get(story.id)) }))
+        .filter(item => item.similarity >= 0.28)
+        .sort((a, b) => b.similarity - a.similarity)
+        .map(item => item.story)
+    }
+    all.filter(story => !vectorById.has(story.id)).slice(0, 5).forEach(backfillStorylineEmbedding)
+  }
+  // Identity facts (where the person studies/lives, their name) are the ones
+  // most often asked across threads, so keep them available even with no
+  // keyword overlap.  `all` is already ordered by status then recency, so it
+  // is the final recency backstop.
+  const identity = all.filter(story => story.memory_kind === 'identity')
+  const merged = []
+  const seen = new Set()
+  for (const story of [...semanticMatches, ...lexicalMatches, ...identity, ...all]) {
+    if (seen.has(story.id)) continue
+    seen.add(story.id); merged.push(story)
+    if (merged.length >= RECALL_LIMIT) break
+  }
+  return merged
 }
 async function issueRefreshToken(userId, req) {
   const token = crypto.randomBytes(48).toString('base64url')
@@ -282,6 +368,7 @@ async function persistMemoryCandidate(user, candidate, sourceQuote) {
     storyline = (await q('INSERT INTO storylines(user_id,topic,memory_kind,summary,source_quotes,first_mentioned_at,last_updated_at) VALUES($1,$2,$3,$4,$5,NOW(),NOW()) RETURNING *', [user.id, candidate.topic, candidate.kind, candidate.summary, JSON.stringify([candidate.evidence || sourceQuote])])).rows[0]
   }
   await q('INSERT INTO memory_events(user_id,storyline_id,event,detail) VALUES($1,$2,$3,$4)', [user.id, storyline.id, event, JSON.stringify({ source: 'automatic', confidence: candidate.confidence, sensitivity: candidate.sensitivity })])
+  backfillStorylineEmbedding(storyline)
   return { storyline, proposal: null }
 }
 async function persistMemoryCandidates(user, candidates, sourceQuote) {
@@ -364,9 +451,9 @@ app.patch('/api/threads/:id', auth, async (req, res) => { const title = String(r
 app.delete('/api/threads/:id', auth, async (req, res) => { const count = (await q('SELECT COUNT(*)::int AS count FROM threads WHERE user_id=$1', [req.user.id])).rows[0].count; if (count <= 1) return res.status(400).json({ error: 'A user must keep at least one thread.' }); const result = await q('DELETE FROM threads WHERE id=$1 AND user_id=$2', [req.params.id, req.user.id]); result.rowCount ? res.json({ ok: true }) : res.status(404).json({ error: 'Thread not found.' }) })
 app.get('/api/conversation', auth, async (req, res) => { const thread = await ensureThread(req.user.id, req.query.thread_id); const [messages, allStories, pending] = await Promise.all([q('SELECT id,role,content,created_at FROM messages WHERE user_id=$1 AND thread_id=$2 ORDER BY id', [req.user.id, thread.id]), stories(req.user.id), proposals(req.user.id)]); res.json({ messages: messages.rows, storylines: allStories, proposals: pending }) })
 app.get('/api/memory/proposals', auth, async (req, res) => res.json({ proposals: await proposals(req.user.id) }))
-app.post('/api/memory/proposals/:id/approve', auth, async (req, res) => { const proposal = (await q("SELECT * FROM memory_proposals WHERE id=$1 AND user_id=$2 AND status='pending'", [req.params.id, req.user.id])).rows[0]; if (!proposal) return res.status(404).json({ error: 'Memory proposal not found.' }); let storyline = (await q("SELECT * FROM storylines WHERE user_id=$1 AND topic=$2 AND status!='resolved'", [req.user.id, proposal.topic])).rows[0]; let event; if (storyline) { storyline = (await q("UPDATE storylines SET summary=$1,memory_kind=$2,source_quotes=$3,status='open',last_updated_at=NOW() WHERE id=$4 RETURNING *", [proposal.summary, proposal.memory_kind || 'other', JSON.stringify([...(storyline.source_quotes || []), proposal.source_quote].filter((v, i, list) => list.indexOf(v) === i).slice(-4)), storyline.id])).rows[0]; event = 'memory.updated' } else { storyline = (await q("INSERT INTO storylines(user_id,topic,memory_kind,summary,source_quotes,first_mentioned_at,last_updated_at) VALUES($1,$2,$3,$4,$5,NOW(),NOW()) RETURNING *", [req.user.id, proposal.topic, proposal.memory_kind || 'other', proposal.summary, JSON.stringify([proposal.source_quote])])).rows[0]; event = 'memory.created' } await q("UPDATE memory_proposals SET status='approved',resolved_at=NOW() WHERE id=$1", [proposal.id]); await q('INSERT INTO memory_events(user_id,storyline_id,event,detail) VALUES($1,$2,$3,$4)', [req.user.id, storyline.id, event, JSON.stringify({ proposal_id: proposal.id, confidence: proposal.confidence, sensitivity: proposal.sensitivity })]); audit(req, 'memory.proposal_approved', { proposal_id: proposal.id }); res.json({ storyline, proposals: await proposals(req.user.id), storylines: await stories(req.user.id) }) })
+app.post('/api/memory/proposals/:id/approve', auth, async (req, res) => { const proposal = (await q("SELECT * FROM memory_proposals WHERE id=$1 AND user_id=$2 AND status='pending'", [req.params.id, req.user.id])).rows[0]; if (!proposal) return res.status(404).json({ error: 'Memory proposal not found.' }); let storyline = (await q("SELECT * FROM storylines WHERE user_id=$1 AND topic=$2 AND status!='resolved'", [req.user.id, proposal.topic])).rows[0]; let event; if (storyline) { storyline = (await q("UPDATE storylines SET summary=$1,memory_kind=$2,source_quotes=$3,status='open',last_updated_at=NOW() WHERE id=$4 RETURNING *", [proposal.summary, proposal.memory_kind || 'other', JSON.stringify([...(storyline.source_quotes || []), proposal.source_quote].filter((v, i, list) => list.indexOf(v) === i).slice(-4)), storyline.id])).rows[0]; event = 'memory.updated' } else { storyline = (await q("INSERT INTO storylines(user_id,topic,memory_kind,summary,source_quotes,first_mentioned_at,last_updated_at) VALUES($1,$2,$3,$4,$5,NOW(),NOW()) RETURNING *", [req.user.id, proposal.topic, proposal.memory_kind || 'other', proposal.summary, JSON.stringify([proposal.source_quote])])).rows[0]; event = 'memory.created' } await q("UPDATE memory_proposals SET status='approved',resolved_at=NOW() WHERE id=$1", [proposal.id]); await q('INSERT INTO memory_events(user_id,storyline_id,event,detail) VALUES($1,$2,$3,$4)', [req.user.id, storyline.id, event, JSON.stringify({ proposal_id: proposal.id, confidence: proposal.confidence, sensitivity: proposal.sensitivity })]); audit(req, 'memory.proposal_approved', { proposal_id: proposal.id }); backfillStorylineEmbedding(storyline); res.json({ storyline, proposals: await proposals(req.user.id), storylines: await stories(req.user.id) }) })
 app.post('/api/memory/proposals/:id/reject', auth, async (req, res) => { const result = await q("UPDATE memory_proposals SET status='rejected',resolved_at=NOW() WHERE id=$1 AND user_id=$2 AND status='pending'", [req.params.id, req.user.id]); if (!result.rowCount) return res.status(404).json({ error: 'Memory proposal not found.' }); audit(req, 'memory.proposal_rejected', { proposal_id: req.params.id }); res.json({ proposals: await proposals(req.user.id) }) })
-app.put('/api/storylines/:id', auth, async (req, res) => { const { topic, summary, status, source_quotes } = req.body || {}; if (status && !['open', 'stale', 'resolved'].includes(status)) return res.status(400).json({ error: 'Invalid memory status.' }); const result = await q('UPDATE storylines SET topic=COALESCE($1,topic),summary=COALESCE($2,summary),status=COALESCE($3,status),source_quotes=COALESCE($4::jsonb,source_quotes),last_updated_at=NOW() WHERE id=$5 AND user_id=$6 RETURNING *', [topic, summary, status, source_quotes ? JSON.stringify(source_quotes) : null, req.params.id, req.user.id]); if (!result.rowCount) return res.status(404).json({ error: 'Memory not found.' }); await q('INSERT INTO memory_events(user_id,storyline_id,event,detail) VALUES($1,$2,$3,$4)', [req.user.id, req.params.id, 'memory.edited', JSON.stringify({ fields: Object.keys({ topic, summary, status, source_quotes }).filter(key => ({ topic, summary, status, source_quotes })[key] !== undefined) })]); audit(req, 'memory.update', { storyline_id: req.params.id }); res.json({ storyline: result.rows[0] }) })
+app.put('/api/storylines/:id', auth, async (req, res) => { const { topic, summary, status, source_quotes } = req.body || {}; if (status && !['open', 'stale', 'resolved'].includes(status)) return res.status(400).json({ error: 'Invalid memory status.' }); const result = await q('UPDATE storylines SET topic=COALESCE($1,topic),summary=COALESCE($2,summary),status=COALESCE($3,status),source_quotes=COALESCE($4::jsonb,source_quotes),last_updated_at=NOW() WHERE id=$5 AND user_id=$6 RETURNING *', [topic, summary, status, source_quotes ? JSON.stringify(source_quotes) : null, req.params.id, req.user.id]); if (!result.rowCount) return res.status(404).json({ error: 'Memory not found.' }); await q('INSERT INTO memory_events(user_id,storyline_id,event,detail) VALUES($1,$2,$3,$4)', [req.user.id, req.params.id, 'memory.edited', JSON.stringify({ fields: Object.keys({ topic, summary, status, source_quotes }).filter(key => ({ topic, summary, status, source_quotes })[key] !== undefined) })]); audit(req, 'memory.update', { storyline_id: req.params.id }); if (topic !== undefined || summary !== undefined) backfillStorylineEmbedding(result.rows[0]); res.json({ storyline: result.rows[0] }) })
 app.delete('/api/storylines/:id', auth, async (req, res) => { const result = await q('DELETE FROM storylines WHERE id=$1 AND user_id=$2 RETURNING id', [req.params.id, req.user.id]); if (!result.rowCount) return res.status(404).json({ error: 'Memory not found.' }); audit(req, 'memory.delete', { storyline_id: req.params.id }); res.json({ ok: true }) })
 app.get('/api/storylines/:id/history', auth, async (req, res) => { const hit = (await q('SELECT id FROM storylines WHERE id=$1 AND user_id=$2', [req.params.id, req.user.id])).rows[0]; if (!hit) return res.status(404).json({ error: 'Memory not found.' }); res.json({ events: (await q('SELECT event,detail,created_at FROM memory_events WHERE user_id=$1 AND storyline_id=$2 ORDER BY id DESC LIMIT 30', [req.user.id, hit.id])).rows }) })
 app.post('/api/chat', auth, quota('chat', 'DAILY_CHAT_LIMIT', 120), async (req, res) => { try { const content = String(req.body?.content || '').trim(); if (!content) return res.status(400).json({ error: 'Message is empty.' }); const thread = await ensureThread(req.user.id, req.body?.thread_id); await q("INSERT INTO messages(user_id,thread_id,role,content) VALUES($1,$2,'user',$3)", [req.user.id, thread.id, content]); await q('UPDATE threads SET updated_at=NOW() WHERE id=$1', [thread.id]); const [context, recent] = await Promise.all([relevantStories(req.user.id, content), recentThreadMessages(req.user.id, thread.id)]); const [candidates, text] = await Promise.all([req.user.memory_enabled ? extractMemories(content, context, recent) : Promise.resolve([]), reply(content, context, req.user.name, Boolean(req.body?.voice), recent)]); const memory = await persistMemoryCandidates(req.user, candidates, content); await q("INSERT INTO messages(user_id,thread_id,role,content) VALUES($1,$2,'assistant',$3)", [req.user.id, thread.id, text]); audit(req, 'chat.message', { content_length: content.length, voice: Boolean(req.body?.voice), auto_memory_count: memory.storylines.length, proposed_memory_count: memory.proposals.length }); res.json({ reply: text, provider: process.env.GROQ_API_KEY ? 'groq' : 'local-fallback', thread, proposals: await proposals(req.user.id), storylines: await stories(req.user.id), context }) } catch (error) { console.error(error); res.status(502).json({ error: 'River could not create a reply. Please try again.' }) } })

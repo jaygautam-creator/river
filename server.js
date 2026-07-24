@@ -366,12 +366,28 @@ function extractStoryline(userId, content) {
   return parseStoryline(db.prepare('SELECT * FROM storylines WHERE id = ?').get(result.lastInsertRowid))
 }
 
+// Lexical overlap alone is brittle: a new thread asking "which university do I
+// go to?" shares no words with a memory stored as "Studies at Stanford", so a
+// hard score>0 filter hides the person's own approved facts.  Lexical scoring
+// only *ranks*; we then top up with the most recent memories so semantically
+// related storylines still reach the model, which does the actual matching.
 function relevantStorylines(userId, content) {
-  const all = getStorylines(userId)
-  if (/(what (do you|can you) remember|what (did|have) we talk|what have i (told|said|shared)|prior conversation|previous conversation|last time|remind me|recall)/i.test(content)) return all.filter(s => s.status !== 'resolved').slice(0, 5)
+  const all = getStorylines(userId).filter(s => s.status !== 'resolved')
+  if (/(what (do you|can you) remember|what (did|have) we talk|what have i (told|said|shared)|prior conversation|previous conversation|last time|remind me|recall)/i.test(content)) return all.slice(0, 6)
   const words = new Set(content.toLowerCase().split(/\W+/).filter(w => w.length > 3))
-  const scored = all.map(s => ({ s, score: [...words].filter(w => `${s.topic} ${s.summary}`.toLowerCase().includes(w)).length }))
-  return scored.filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 3).map(x => x.s)
+  const matched = all
+    .map(s => ({ s, score: [...words].filter(w => `${s.topic} ${s.summary}`.toLowerCase().includes(w)).length }))
+    .filter(x => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map(x => x.s)
+  const merged = []
+  const seen = new Set()
+  for (const s of [...matched, ...all]) {
+    if (seen.has(s.id)) continue
+    seen.add(s.id); merged.push(s)
+    if (merged.length >= 6) break
+  }
+  return merged
 }
 
 function generateLocalReply(content, storylines, userName) {
