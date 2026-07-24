@@ -253,12 +253,12 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
   // treated as permission for River to speak. Hands-free remains available as
   // an opt-in beta while the streaming provider learns the room.
   const [turnMode, setTurnMode] = useState('tap')
-  const [message, setMessage] = useState('Start reliable voice, then hold to talk. Hands-free beta is available when you want to try it.')
+  const [message, setMessage] = useState('Start reliable voice, then hold the button or the R key to talk. Hands-free beta is available when you want to try it.')
   const streamRef = useRef(null), audioRef = useRef(null), recorderRef = useRef(null), audioUrlRef = useRef(null), speechAbortRef = useRef(null), deviceSpeechTimerRef = useRef(null)
   const contextRef = useRef(null), analyserRef = useRef(null), monitorRef = useRef(null), recognitionRef = useRef(null), conversationRef = useRef(false)
   const liveSocketRef = useRef(null), liveProcessorRef = useRef(null), liveInputSourceRef = useRef(null), liveSourcesRef = useRef(new Set()), liveNextPlaybackRef = useRef(0), liveInputRef = useRef(''), liveOutputRef = useRef(''), liveReconnectAttemptsRef = useRef(0), liveReconnectTimerRef = useRef(null), liveReadyTimerRef = useRef(null), liveActiveRef = useRef(false)
   const [liveActive, setLiveActive] = useState(false)
-  const stateRef = useRef('idle'), heardSpeechRef = useRef(false), lastSpeechRef = useRef(0), speechOnsetRef = useRef(0), turnStartedRef = useRef(0), noiseFloorRef = useRef(2.2), interimRef = useRef(''), transcriptChangedAtRef = useRef(0), finalTranscriptAtRef = useRef(0), turnModeRef = useRef('tap'), turnNonceRef = useRef(0), manualTurnRef = useRef(false)
+  const stateRef = useRef('idle'), heardSpeechRef = useRef(false), lastSpeechRef = useRef(0), speechOnsetRef = useRef(0), turnStartedRef = useRef(0), noiseFloorRef = useRef(2.2), interimRef = useRef(''), transcriptChangedAtRef = useRef(0), finalTranscriptAtRef = useRef(0), turnModeRef = useRef('tap'), turnNonceRef = useRef(0), manualTurnRef = useRef(false), holdKeyActiveRef = useRef(false)
   const setVoiceState = value => { stateRef.current = value; setState(value) }
   const metric = (stage, startedAt, outcome = 'ok') => { if (startedAt) void api('/api/telemetry/voice', { method: 'POST', body: JSON.stringify({ stage, duration_ms: Date.now() - startedAt, outcome }) }).catch(() => {}) }
   const clearMonitor = () => { if (monitorRef.current) window.clearInterval(monitorRef.current); monitorRef.current = null }
@@ -412,7 +412,7 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
   }
   const resumeAfterReply = () => {
     if (!conversationRef.current) return
-    if (turnModeRef.current === 'tap') { setVoiceState('ready'); setMessage('Hold to talk when you are ready for your next turn.') }
+    if (turnModeRef.current === 'tap') { setVoiceState('ready'); setMessage('Hold the button or the R key to talk when you are ready for your next turn.') }
     else beginListening(false)
   }
   const speakWithDeviceVoice = text => {
@@ -534,7 +534,7 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
         if (stateRef.current === 'listening' && !manualTurnRef.current && heardSpeechRef.current && now - turnStartedRef.current >= 1000 && now - lastSpeechRef.current > pauseForCurrentTurn()) recorderRef.current?.stop()
       }, 80)
       if (mode === 'handsfree') beginListening(false)
-      else { setVoiceState('ready'); setMessage('Press and hold the button while you speak. Release it when you are done.') }
+      else { setVoiceState('ready'); setMessage('Press and hold the button — or hold the R key — while you speak. Release when you are done.') }
     } catch (error) { conversationRef.current = false; clearMonitor(); clearLiveReadyTimer(); try { liveSocketRef.current?.close() } catch {} liveSocketRef.current = null; liveActiveRef.current = false; setLiveActive(false); try { liveProcessorRef.current?.disconnect() } catch {} liveProcessorRef.current = null; try { liveInputSourceRef.current?.disconnect() } catch {} liveInputSourceRef.current = null; streamRef.current?.getTracks().forEach(track => track.stop()); streamRef.current = null; contextRef.current?.close().catch(() => {}); contextRef.current = null; setVoiceState('error'); setMessage(error.message || 'Voice setup could not start. Check your microphone and try again.') }
   }
   const replay = async () => { try { await playCurrentReply() } catch { setMessage('Audio is still blocked. Check this tab’s sound/autoplay permission, then try again.') } }
@@ -542,16 +542,35 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
   const switchMode = next => {
     turnModeRef.current = next; setTurnMode(next)
     if (next === 'handsfree') {
-      // Hands-free uses the provider's streaming VAD and is explicitly opt-in.
-      // Starting a fresh session avoids carrying a partially recorded turn.
-      if (!liveActiveRef.current) { restart({ skipLive: false, mode: 'handsfree' }); return }
-      setMessage('Hands-free beta is listening continuously. Switch to press-to-talk in noisy spaces.'); return
+      // Hands-free runs River's free local turn pipeline (Groq transcription +
+      // speech) with on-device pause detection — no paid realtime provider.
+      // A fresh session avoids carrying a partially recorded press-to-talk turn.
+      restart({ skipLive: true, mode: 'handsfree' }); return
     }
     if (liveSocketRef.current || liveActiveRef.current) { restart({ skipLive: true, mode: 'tap' }); return }
     if (!conversationRef.current) return
     if (recorderRef.current?.state === 'recording') recorderRef.current.stop()
-    setVoiceState('ready'); setMessage('Press and hold the button while you speak. Release it when you are done.')
+    setVoiceState('ready'); setMessage('Press and hold the button — or hold the R key — while you speak. Release when you are done.')
   }
+  // Global "R" shortcut mirrors the on-screen Hold-to-talk button: hold R to
+  // speak, release to send. Uses refs so a single mount-time listener always
+  // reflects the current voice state, and ignores repeats and text fields.
+  useEffect(() => {
+    const isTypingTarget = el => el && (/^(input|textarea|select)$/i.test(el.tagName) || el.isContentEditable)
+    const canHoldNow = () => !liveActiveRef.current && conversationRef.current && turnModeRef.current === 'tap' && ['ready', 'listening'].includes(stateRef.current)
+    const releaseHold = () => { if (!holdKeyActiveRef.current) return; holdKeyActiveRef.current = false; stopManualTurn() }
+    const onKeyDown = event => {
+      if (event.key !== 'r' && event.key !== 'R') return
+      if (event.repeat || event.metaKey || event.ctrlKey || event.altKey || isTypingTarget(event.target)) return
+      if (holdKeyActiveRef.current || !canHoldNow()) return
+      holdKeyActiveRef.current = true; event.preventDefault(); beginListening(true)
+    }
+    const onKeyUp = event => { if (event.key === 'r' || event.key === 'R') releaseHold() }
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', releaseHold)
+    return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp); window.removeEventListener('blur', releaseHold) }
+  }, [])
   const canManualTurn = !liveActive && conversationRef.current && turnMode === 'tap' && ['ready', 'listening'].includes(state)
   return <div className="voice-screen">
     <button className="back-link" onClick={() => { stop(); onBack() }}>← back to text</button>
@@ -569,10 +588,10 @@ function VoiceScreen({ onBack, onSend, onLiveTurn }) {
       {state === 'idle' || state === 'error'
         ? <div className="voice-recovery">
             <button className="save-button voice-start" onClick={() => restart({ skipLive: true, mode: 'tap' })} disabled={state === 'connecting'}><Mic size={14} /> {state === 'error' ? 'Try reliable voice again' : 'Start reliable voice'}</button>
-            <button className="ghost-button voice-start" onClick={() => restart({ skipLive: false, mode: 'handsfree' })} disabled={state === 'connecting'}><Mic size={14} /> Try hands-free beta</button>
+            <button className="ghost-button voice-start" onClick={() => restart({ skipLive: true, mode: 'handsfree' })} disabled={state === 'connecting'}><Mic size={14} /> Try hands-free beta</button>
           </div>
         : <div className="voice-actions">
-            {canManualTurn && <button className="save-button voice-start hold-to-talk" onPointerDown={() => beginListening(true)} onPointerUp={stopManualTurn} onPointerCancel={stopManualTurn} onPointerLeave={event => { if (event.buttons) stopManualTurn() }} onKeyDown={event => { if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) beginListening(true) }} onKeyUp={event => { if (event.key === ' ' || event.key === 'Enter') stopManualTurn() }}><Mic size={14} /> Hold to talk</button>}
+            {canManualTurn && <button className="save-button voice-start hold-to-talk" onPointerDown={() => beginListening(true)} onPointerUp={stopManualTurn} onPointerCancel={stopManualTurn} onPointerLeave={event => { if (event.buttons) stopManualTurn() }} onKeyDown={event => { if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) beginListening(true) }} onKeyUp={event => { if (event.key === ' ' || event.key === 'Enter') stopManualTurn() }}><Mic size={14} /> Hold to talk <kbd className="hold-key">R</kbd></button>}
             {state === 'awaiting-playback' && <button className="save-button voice-start" onClick={replay}><Headphones size={14} /> Play River’s reply</button>}
             <button className="ghost-button voice-start" onClick={stop}><X size={14} /> End conversation</button>
           </div>}
