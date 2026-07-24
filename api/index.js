@@ -552,9 +552,20 @@ const groqSpeech = async input => {
   return { audio: Buffer.from(await response.arrayBuffer()), provider: 'groq', model }
 }
 
+// Groq speech is free, fast, and verified working in production, so it is the
+// default voice. Gemini TTS stays opt-in via VOICE_SPEECH_PROVIDER=gemini: its
+// preview model was returning HTTP 200 with no audio, which only added ~9s of
+// latency before falling back to Groq on every spoken reply.
+const speechProviderOrder = () => {
+  const groq = Boolean(process.env.GROQ_API_KEY)
+  const gemini = Boolean(process.env.GEMINI_API_KEY)
+  const order = process.env.VOICE_SPEECH_PROVIDER === 'gemini' && gemini ? ['gemini', 'groq'] : ['groq', 'gemini']
+  return order.filter(name => (name === 'groq' ? groq : gemini))
+}
+const speechModelFor = provider => provider === 'gemini' ? (process.env.GEMINI_SPEECH_MODEL || 'gemini-3.1-flash-tts-preview') : (process.env.GROQ_SPEECH_MODEL || 'canopylabs/orpheus-v1-english')
 app.get('/api/voice/session', auth, (req, res) => {
   const transcriptionReady = Boolean(process.env.GROQ_API_KEY)
-  const speechProvider = process.env.GEMINI_API_KEY ? 'gemini' : (transcriptionReady ? 'groq' : null)
+  const speechProvider = speechProviderOrder()[0] || null
   const speechReady = Boolean(speechProvider)
   const enabled = transcriptionReady && speechReady
   const message = enabled
@@ -591,20 +602,18 @@ app.post('/api/voice/speak', auth, quota('voice_speech', 'DAILY_VOICE_SPEECH_LIM
   const input = String(req.body?.text || '').trim().slice(0, 600)
   if (!input) return res.status(400).json({ error: 'Text is required.', code: 'text_required' })
   try {
+    const speechFns = { gemini: geminiSpeech, groq: groqSpeech }
     let speech
-    let geminiFailure
-    if (process.env.GEMINI_API_KEY) {
-      try { speech = await geminiSpeech(input) } catch (error) { geminiFailure = error; console.warn('voice.speak.provider_failure', { provider: error.provider, status: error.status, code: error.code, model: error.model }) }
+    let lastError
+    for (const name of speechProviderOrder()) {
+      try { speech = await speechFns[name](input); break } catch (error) { lastError = error; console.warn('voice.speak.provider_failure', { provider: error.provider, status: error.status, code: error.code, model: error.model }) }
     }
-    if (!speech && process.env.GROQ_API_KEY) {
-      try { speech = await groqSpeech(input) } catch (error) {
-        console.warn('voice.speak.provider_failure', { provider: error.provider, status: error.status, code: error.code, model: error.model })
-        if (error.code === 'model_terms_required') return res.status(412).json({ error: 'Groq requires one-time acceptance for River’s speech model. River’s reply is still available in text.', code: error.code })
-        if (error.status === 429) return res.status(429).json({ error: 'River’s speech provider is busy right now. River’s reply is still available in text.', code: error.code })
-        return res.status(error.status === 401 || error.status === 403 ? 503 : 502).json({ error: 'River’s speech provider is temporarily unavailable. River’s reply is still available in text.', code: error.code })
-      }
+    if (!speech) {
+      const error = lastError || {}
+      if (error.code === 'model_terms_required') return res.status(412).json({ error: 'Groq requires one-time acceptance for River’s speech model. River’s reply is still available in text.', code: error.code })
+      if (error.status === 429) return res.status(429).json({ error: 'River’s speech provider is busy right now. River’s reply is still available in text.', code: error.code })
+      return res.status(error.status === 401 || error.status === 403 ? 503 : 502).json({ error: 'River’s speech provider is temporarily unavailable. River’s reply is still available in text.', code: error.code || 'speech_provider_error' })
     }
-    if (!speech) return res.status(geminiFailure?.status === 429 ? 429 : 502).json({ error: 'River’s speech provider is temporarily unavailable. River’s reply is still available in text.', code: geminiFailure?.code || 'speech_provider_error' })
     res.setHeader('Content-Type', 'audio/wav')
     res.setHeader('X-River-Speech-Provider', speech.provider)
     res.send(speech.audio)
