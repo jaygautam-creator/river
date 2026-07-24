@@ -22,7 +22,7 @@ Most conversational AI starts from zero. River is designed around continuity wit
 - **Consentful, useful memory**—River automatically saves clear, non-sensitive, high-confidence details that help it understand someone over time (such as enduring preferences, hobbies, plans, and projects). Sensitive or uncertain details always remain proposals for the person to review, edit, approve, or reject.
 - **Searchable continuity** across conversations and approved memories, with recall-aware retrieval that never silently falls back to a fabricated history.
 - **Real ownership controls**: edit, export, revoke memory consent, or delete the account.
-- **Account and privacy controls** including secure browser sessions, CSRF protection, MFA, and device-session controls.
+- **Account and privacy controls** including secure browser sessions, CSRF protection, MFA, email-free backup recovery codes, and device-session controls.
 
 ## Quick start
 
@@ -64,9 +64,18 @@ Set `NODE_ENV=production`, unique `JWT_SECRET` and `FIELD_ENCRYPTION_KEY` values
 
 The production container runs as a non-root `river` user, persists the local database in `/app/data`, and has a health check. Its encrypted backup workflow requires `RIVER_BACKUP_ENCRYPTION_KEY` in production. To restore, stop River first, then explicitly set `RIVER_RESTORE_SOURCE`, `RIVER_BACKUP_ENCRYPTION_KEY`, and `RIVER_RESTORE_OVERWRITE=true` before running `npm run restore`.
 
+### Account recovery
+
+Because a forgotten password would otherwise mean permanent lockout, River issues **backup recovery codes**—no email provider or custom domain required:
+
+- Eight single-use codes are shown once at signup, with a copy control and an explicit save-acknowledgement step. They are stored only as SHA-256 hashes and are never emailed or persisted in plaintext.
+- A **Forgot your password?** flow on the sign-in screen takes an email, one recovery code, and a new password. A successful reset rotates the password, invalidates existing sessions, and clears any failed-login lockout.
+- The **Account & privacy** panel shows how many codes remain and can regenerate a fresh set at any time.
+- The recovery endpoint is rate-limited and returns a uniform failure for a wrong email or a wrong code, so neither can be probed.
+
 ### Optional transactional email
 
-River can deliver password-recovery and email-verification links through Resend when these ignored environment variables are configured. Without them, those local-development flows remain available through the server console only and must not be relied on in production.
+River can additionally deliver password-recovery and email-verification links through Resend when these ignored environment variables are configured. Without them, River relies on the recovery codes above, and the console-only email links must not be relied on in production.
 
 ```bash
 RESEND_API_KEY=re_...
@@ -84,7 +93,7 @@ EMAIL_FROM="River <hello@example.com>"
 - User-controlled memory proposals, privacy preferences, and JSON data export.
 - Adaptive voice mode: Groq handles transcription; Gemini TTS is preferred when configured, with Groq speech as an automatic fallback. River waits for sustained speech and a natural pause, replies aloud, and resumes listening. It supports sustained-speech barge-in and a press-to-talk fallback for noisy environments. Recordings are not stored by River.
 - Health, readiness, and authenticated metrics endpoints plus CI build/audit checks.
-- Email verification, authenticator-app MFA, refresh-session device listing/revocation, temporary failed-login lockout, and transactional password-reset delivery interfaces.
+- Email verification, authenticator-app MFA, single-use backup recovery codes for email-free account recovery, refresh-session device listing/revocation, temporary failed-login lockout, and transactional password-reset delivery interfaces.
 
 ## Voice setup
 
